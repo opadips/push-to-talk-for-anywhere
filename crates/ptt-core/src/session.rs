@@ -18,6 +18,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError}
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 /// How often the worker wakes while nothing is pending; it doubles as the
 /// interval in which it notices orders from the tray or the settings window.
@@ -292,7 +293,10 @@ fn pump<C: MicController, S: InputSource>(
                     }?;
                 }
                 Ok(Command::Rebind { binding, swallow }) => source.set_binding(binding, swallow),
-                Ok(Command::Capture(reply)) => capture = Some((source.capture_next(), reply)),
+                Ok(Command::Capture(reply)) => {
+                    info!("capture armed: the next key press becomes the binding");
+                    capture = Some((source.capture_next(), reply));
+                }
                 Ok(Command::Quit) => return Ok(()),
                 Err(TryRecvError::Empty) => break,
                 // The owner dropped its handle; `Drop` also stops us, this
@@ -305,13 +309,20 @@ fn pump<C: MicController, S: InputSource>(
         // which cannot be held to talk, so the capture starts over.
         if let Some((received, reply)) = &mut capture {
             match received.try_recv() {
-                Ok(binding) if binding.is_modifier() => *received = source.capture_next(),
+                Ok(binding) if binding.is_modifier() => {
+                    info!("{binding:?} alone cannot be held to talk — capture starts over");
+                    *received = source.capture_next();
+                }
                 Ok(binding) => {
+                    info!("captured {binding:?}");
                     let _ = reply.send(binding);
                     capture = None;
                 }
                 Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => capture = None,
+                Err(TryRecvError::Disconnected) => {
+                    warn!("the capture listener went away");
+                    capture = None;
+                }
             }
         }
 

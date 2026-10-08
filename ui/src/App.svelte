@@ -176,7 +176,8 @@
 
   {#if status?.error}
     <div class="banner error">{status.error}</div>
-  {:else if notice}
+  {/if}
+  {#if notice}
     <div class="banner">{notice}</div>
   {/if}
 

@@ -2767,6 +2767,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "toml 1.1.7+spec-1.1.0",
+ "tracing",
  "windows",
 ]
 

@@ -5,6 +5,7 @@ use ptt_core::audio::DeviceInfo;
 use ptt_core::config::Config;
 use ptt_core::input::Binding;
 use tauri::{AppHandle, Manager, State};
+use tracing::{info, warn};
 
 /// The saved settings the form starts from (plan §8: `config.toml`).
 #[tauri::command]
@@ -68,6 +69,7 @@ pub async fn set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
 /// one capture can be outstanding.
 #[tauri::command]
 pub async fn capture_binding(app: AppHandle) -> Result<Binding, String> {
+    info!("capture requested from the settings window");
     let captured = {
         let state = app.state::<AppState>();
         let session = state.session.lock().unwrap();
@@ -77,11 +79,21 @@ pub async fn capture_binding(app: AppHandle) -> Result<Binding, String> {
             .as_ref()
             .filter(|session| !session.finished())
             .map(|session| session.capture())
-            .ok_or_else(|| "the session is not running — check the tray menu".to_string())?
+            .ok_or_else(|| {
+                let message = "the session is not running — check the tray menu".to_string();
+                warn!("capture refused: {message}");
+                message
+            })?
     };
 
     tauri::async_runtime::spawn_blocking(move || captured.recv())
         .await
-        .map_err(|error| error.to_string())?
-        .map_err(|_| "the session stopped before a key was pressed".to_string())
+        .map_err(|error| {
+            warn!("capture task failed: {error}");
+            error.to_string()
+        })?
+        .map_err(|error| {
+            warn!("capture ended without a key: {error:?}");
+            "the session stopped before a key was pressed".to_string()
+        })
 }
