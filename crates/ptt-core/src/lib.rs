@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod config;
 pub mod engine;
+pub mod error;
 pub mod failsafe;
 pub mod input;
 pub mod state;

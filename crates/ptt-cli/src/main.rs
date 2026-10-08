@@ -1,9 +1,47 @@
 //! `ptt` — a tiny binary for manually exercising `ptt-core`.
 //!
-//! Subcommands (`devices`, `mute`, `unmute`, `status`, `ptt`) are added by
-//! milestones M1 and M2 of the implementation plan; until then it only
-//! reports the version so the binary can be smoke-tested in CI.
+//! Commands: `devices`, `mute`, `unmute`, `status` (plan §9, milestone M1).
 
-fn main() {
-    println!("ptt {}", env!("CARGO_PKG_VERSION"));
+mod cli;
+
+use anyhow::Result;
+use ptt_core::audio::MicController;
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = cli::parse(&args)?;
+    let output = match &command {
+        cli::Command::Help => cli::USAGE.to_string(),
+        other => {
+            let ctl = controller(other)?;
+            cli::execute(other, &*ctl)?
+        }
+    };
+    println!("{output}");
+    Ok(())
+}
+
+/// Build the controller for a parsed command (Windows, plan §7).
+#[cfg(windows)]
+fn controller(command: &cli::Command) -> Result<Box<dyn MicController>> {
+    use ptt_core::audio::{wasapi::WasapiController, DEFAULT_DEVICE};
+
+    let requested = match command {
+        cli::Command::Mute { device }
+        | cli::Command::Unmute { device }
+        | cli::Command::Status { device } => {
+            device.clone().unwrap_or_else(|| DEFAULT_DEVICE.to_string())
+        }
+        cli::Command::Devices | cli::Command::Help => DEFAULT_DEVICE.to_string(),
+    };
+    Ok(Box::new(WasapiController::new(requested)))
+}
+
+/// The audio stack is Windows-only (plan §1: no macOS/Linux support).
+#[cfg(not(windows))]
+fn controller(_command: &cli::Command) -> Result<Box<dyn MicController>> {
+    anyhow::bail!(
+        "ptt controls the microphone on Windows only (this build targets {})",
+        std::env::consts::OS
+    )
 }
