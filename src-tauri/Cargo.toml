@@ -1,0 +1,14 @@
+[package]
+name = "ptt-tool"
+description = "Windows push-to-talk tray app: mic muted by default, unmuted while the bound key is held"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }

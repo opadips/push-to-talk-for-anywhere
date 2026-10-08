@@ -1,0 +1,9 @@
+[package]
+name = "ptt-core"
+description = "Push-to-talk core logic: no UI, no Tauri, no network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
