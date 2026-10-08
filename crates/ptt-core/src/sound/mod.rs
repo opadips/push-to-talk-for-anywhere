@@ -83,7 +83,7 @@ pub fn scale_wav(wav: &[u8], volume: f32) -> Option<Vec<u8>> {
     let data = data.filter(|_| pcm16)?;
 
     let mut scaled = wav.to_vec();
-    for pair in scaled[data].chunks_exact_mut(2) {
+    for pair in scaled[data].as_chunks_mut::<2>().0 {
         let sample = i16::from_le_bytes([pair[0], pair[1]]);
         let value = (f32::from(sample) * gain).round() as i16;
         pair.copy_from_slice(&value.to_le_bytes());
@@ -98,8 +98,10 @@ mod tests {
     /// Samples of a 16-bit PCM WAV, past the 44-byte header our files have.
     fn samples(wav: &[u8]) -> Vec<i16> {
         wav[44..]
-            .chunks_exact(2)
-            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
             .collect()
     }
 
