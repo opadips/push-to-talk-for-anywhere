@@ -13,7 +13,7 @@ pub mod wasapi;
 ///
 /// `id` is the endpoint ID string (`IMMDevice::GetId`), never a list index —
 /// indices change whenever devices are plugged in (plan §7).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceInfo {
     pub id: String,
     pub name: String,

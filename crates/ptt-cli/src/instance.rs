@@ -5,8 +5,9 @@
 ///
 /// The handle is deliberately never closed: holding it *is* the guard, and
 /// Windows releases the mutex when the process ends — so a second launch
-/// quits in favour of the first (plan §9 M3).
-#[cfg(any(windows, test))]
+/// quits in favour of the first (plan §9 M3). Callers must take it at most
+/// once per process: `CreateMutexW` reports "already exists" for a second
+/// handle in the *same* process too.
 pub fn acquire() -> anyhow::Result<()> {
     #[cfg(windows)]
     {
@@ -32,7 +33,6 @@ pub fn acquire() -> anyhow::Result<()> {
 
 /// Is `pid` still running? Plan §6.4 needs this to decide whether the
 /// microphone recorded in `state.json` was abandoned by a dead process.
-#[cfg(any(windows, test))]
 pub fn process_running(pid: u32) -> bool {
     #[cfg(windows)]
     {

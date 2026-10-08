@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use std::sync::mpsc::{Receiver, Sender};
 
 /// A mouse button that can be bound (plan §1: including the side buttons).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
     Left,
     Right,
@@ -46,7 +46,11 @@ impl MouseButton {
 }
 
 /// The one input the app listens for (plan §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` are for the settings window: the UI both reads
+/// the bound input and receives the one "press any key" captured (plan §9
+/// M4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Binding {
     /// `vk` is the virtual-key code, `scan` the scan code (both are recorded
     /// so the binding survives layout details, plan §8).
@@ -74,6 +78,22 @@ impl Binding {
         match self {
             Self::Key { vk, .. } => format!("key {vk:#04x}"),
             Self::Mouse(button) => format!("mouse {}", button.name()),
+        }
+    }
+
+    /// The name the settings window shows for what the user just pressed
+    /// (plan §9 M4's "press any key"): `Caps Lock`, `Mouse button 4 (back)`.
+    /// [`Binding::describe`] stays the terse form the CLI prints.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Key { vk, .. } => key_name(*vk),
+            Self::Mouse(button) => match button {
+                MouseButton::Left => "Left mouse button".to_string(),
+                MouseButton::Right => "Right mouse button".to_string(),
+                MouseButton::Middle => "Middle mouse button".to_string(),
+                MouseButton::X1 => "Mouse button 4 (back)".to_string(),
+                MouseButton::X2 => "Mouse button 5 (forward)".to_string(),
+            },
         }
     }
 
@@ -110,6 +130,44 @@ impl Binding {
             Self::Key { vk, .. } => matches!(*vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5),
             Self::Mouse(_) => false,
         }
+    }
+}
+
+/// Virtual-key name for [`Binding::label`] (plan §9 M4 shows what the user
+/// pressed). Unknown codes fall back to the hex code the CLI prints.
+fn key_name(vk: u16) -> String {
+    match vk {
+        0x08 => "Backspace".to_string(),
+        0x09 => "Tab".to_string(),
+        0x0D => "Enter".to_string(),
+        0x10 => "Shift".to_string(),
+        0x11 => "Ctrl".to_string(),
+        0x12 => "Alt".to_string(),
+        0x13 => "Pause".to_string(),
+        0x14 => "Caps Lock".to_string(),
+        0x1B => "Escape".to_string(),
+        0x20 => "Space".to_string(),
+        0x21 => "Page Up".to_string(),
+        0x22 => "Page Down".to_string(),
+        0x23 => "End".to_string(),
+        0x24 => "Home".to_string(),
+        0x25 => "Left Arrow".to_string(),
+        0x26 => "Up Arrow".to_string(),
+        0x27 => "Right Arrow".to_string(),
+        0x28 => "Down Arrow".to_string(),
+        0x2C => "Print Screen".to_string(),
+        0x2D => "Insert".to_string(),
+        0x2E => "Delete".to_string(),
+        0x5B | 0x5C => "Windows".to_string(),
+        0x5D => "Context Menu".to_string(),
+        0x90 => "Num Lock".to_string(),
+        0x91 => "Scroll Lock".to_string(),
+        // Digits, letters, numpad digits and function keys.
+        0x30..=0x39 => ((b'0' + (vk - 0x30) as u8) as char).to_string(),
+        0x41..=0x5A => ((b'A' + (vk - 0x41) as u8) as char).to_string(),
+        0x60..=0x69 => format!("Numpad {}", vk - 0x60),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        _ => format!("Key {vk:#04x}"),
     }
 }
 
@@ -236,5 +294,19 @@ mod tests {
         );
         assert!(!Binding::Key { vk: 0x41, scan: 0 }.is_modifier(), "A");
         assert!(!Binding::Mouse(MouseButton::X1).is_modifier());
+    }
+
+    #[test]
+    fn labels_are_what_the_settings_window_shows() {
+        assert_eq!(caps_lock().label(), "Caps Lock");
+        assert_eq!(Binding::Key { vk: 0x41, scan: 0 }.label(), "A");
+        assert_eq!(Binding::Key { vk: 0x7B, scan: 0 }.label(), "F12");
+        assert_eq!(Binding::Key { vk: 0x65, scan: 0 }.label(), "Numpad 5");
+        assert_eq!(
+            Binding::Mouse(MouseButton::X1).label(),
+            "Mouse button 4 (back)"
+        );
+        // Something the table does not know still says what it is.
+        assert_eq!(Binding::Key { vk: 0xE8, scan: 0 }.label(), "Key 0xe8");
     }
 }
