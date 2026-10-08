@@ -90,7 +90,15 @@
     if (!form) return;
     busy = true;
     try {
-      settings = await invoke<Config>("save_settings", { settings: form });
+      // Sliders are typed as numbers, but a `<select>`/`<input>` hand-back
+      // can arrive as a string — send numbers for sure, the config is
+      // strict about types (plan §8).
+      const payload: Config = {
+        ...form,
+        audio: { ...form.audio, release_delay_ms: Number(form.audio.release_delay_ms) },
+        sounds: { ...form.sounds, volume: Number(form.sounds.volume) },
+      };
+      settings = await invoke<Config>("save_settings", { settings: payload });
       form = structuredClone(settings);
       label = await labelFor(form);
       flash("Saved");
@@ -190,6 +198,9 @@
               {device.name}{device.is_default ? " (system default)" : ""}
             </option>
           {/each}
+          {#if form.audio.device_id !== "default" && !devices.some((d) => d.id === form.audio.device_id)}
+            <option value={form.audio.device_id}>(not connected) {form.audio.device_id}</option>
+          {/if}
         </select>
       </label>
       <label class="field">

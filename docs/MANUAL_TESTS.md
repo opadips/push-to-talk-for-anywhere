@@ -13,8 +13,14 @@ you did not actually observe.
 ## Running the checks
 
 Two ways to drive it: `ptt.exe` in a terminal for the low-level checks, and
-the `ptt-tool` tray app (M4) for the product itself. Use a release build
-(`cargo build --release`, or the CI artifact).
+the `ptt-tool` tray app (M4) for the product itself. On Windows, build both
+(`ui/dist` is generated, so the settings window must exist before Cargo runs):
+
+```text
+npm ci --prefix ui              # first time only
+npm run build --prefix ui       # repeat after editing the settings window
+cargo build --release           # target\release\ptt.exe and ptt-tool.exe
+```
 
 ```text
 target\release\ptt-tool.exe            # the tray app (M4)
