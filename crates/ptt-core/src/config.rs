@@ -159,7 +159,55 @@ pub struct LoadReport {
     pub messages: Vec<String>,
 }
 
+/// One-off overrides for a single run — the `ptt ptt` flags (plan §8). Every
+/// field left `None` means "the file decides"; the tray app, which has no
+/// flags, resolves with [`Overrides::default`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Overrides {
+    pub device: Option<String>,
+    pub binding: Option<Binding>,
+    pub release_delay_ms: Option<u64>,
+    pub swallow: Option<bool>,
+}
+
 impl Config {
+    /// Load `path`, apply `overrides` on top and write the result back (plan
+    /// §8): the file is the source of truth, an override is a one-off, and
+    /// an unreadable file is set aside as evidence instead of being silently
+    /// destroyed. Returns the effective config plus everything worth
+    /// logging.
+    pub fn resolve(path: &Path, overrides: &Overrides) -> Result<(Config, Vec<String>)> {
+        let (mut config, report) = Config::load(path);
+        let corrupt = report.source == LoadSource::Corrupt;
+        let mut messages = report.messages;
+
+        if corrupt {
+            let backup = path.with_extension("toml.bad");
+            match std::fs::rename(path, &backup) {
+                Ok(()) => messages.push(format!("unreadable config kept at {}", backup.display())),
+                Err(error) => {
+                    messages.push(format!("could not keep the unreadable config: {error}"))
+                }
+            }
+        }
+
+        if let Some(device) = &overrides.device {
+            config.audio.device_id = device.clone();
+        }
+        if let Some(binding) = &overrides.binding {
+            let swallow = overrides.swallow.unwrap_or(config.binding.swallow);
+            config.set_binding(binding, swallow);
+        } else if let Some(swallow) = overrides.swallow {
+            config.binding.swallow = swallow;
+        }
+        if let Some(release_delay_ms) = overrides.release_delay_ms {
+            config.audio.release_delay_ms = release_delay_ms;
+        }
+
+        messages.extend(config.validate());
+        config.save(path)?;
+        Ok((config, messages))
+    }
     /// Read `path`. Never fails: a missing, unreadable or corrupt file
     /// yields defaults plus an explanation (plan §8).
     pub fn load(path: &Path) -> (Config, LoadReport) {
@@ -555,5 +603,85 @@ start_hidden = false
         assert_eq!(cfg.binding.scan, 0x1e);
         assert_eq!(cfg.binding.mouse_button, "");
         assert!(cfg.binding.swallow);
+    }
+
+    // --- resolve: file first, overrides on top (plan §8) ------------------
+
+    /// A `config.toml` with values nothing on the command line asked for.
+    fn write_file_config(path: &Path) {
+        let mut file = Config::default();
+        file.audio.release_delay_ms = 500;
+        file.audio.device_id = "file-device".into();
+        file.binding.kind = "mouse".into();
+        file.binding.mouse_button = "x1".into();
+        file.binding.swallow = false;
+        file.save(path).unwrap();
+    }
+
+    #[test]
+    fn overrides_win_over_the_file() {
+        let path = scratch("overrides.toml");
+        write_file_config(&path);
+
+        let overrides = Overrides {
+            device: Some("flag-device".into()),
+            binding: Some(Binding::Key { vk: 0x41, scan: 0 }),
+            release_delay_ms: Some(0),
+            swallow: Some(true),
+        };
+        let (cfg, _messages) = Config::resolve(&path, &overrides).unwrap();
+
+        assert_eq!(cfg.audio.release_delay_ms, 0);
+        assert_eq!(cfg.audio.device_id, "flag-device");
+        assert_eq!(cfg.binding(), Binding::Key { vk: 0x41, scan: 0 });
+        assert!(cfg.binding.swallow);
+    }
+
+    #[test]
+    fn the_config_file_decides_when_no_override_is_given() {
+        let path = scratch("file-decides.toml");
+        write_file_config(&path);
+
+        let (cfg, _messages) = Config::resolve(&path, &Overrides::default()).unwrap();
+
+        assert_eq!(cfg.audio.release_delay_ms, 500, "the file's delay is used");
+        assert_eq!(cfg.audio.device_id, "file-device");
+        assert_eq!(cfg.binding(), Binding::Mouse(MouseButton::X1));
+        assert!(!cfg.binding.swallow, "the file's swallow flag is used");
+    }
+
+    #[test]
+    fn resolving_a_first_run_creates_the_config_file() {
+        let path = scratch("first-run.toml");
+        let _ = std::fs::remove_file(&path);
+
+        let (cfg, _messages) = Config::resolve(&path, &Overrides::default()).unwrap();
+
+        assert!(path.exists(), "config.toml is written for the user to edit");
+        assert_eq!(cfg, Config::default());
+        let (reloaded, report) = Config::load(&path);
+        assert_eq!(report.source, LoadSource::File, "what was written reloads");
+        assert_eq!(reloaded, Config::default());
+    }
+
+    #[test]
+    fn an_unreadable_config_is_kept_as_evidence_and_replaced_by_defaults() {
+        let path = scratch("corrupt-resolve.toml");
+        std::fs::write(&path, "not [valid toml").unwrap();
+
+        let (cfg, messages) = Config::resolve(&path, &Overrides::default()).unwrap();
+
+        assert_eq!(cfg, Config::default(), "defaults take over");
+        assert!(
+            path.with_extension("toml.bad").exists(),
+            "the broken file is kept for the user to look at"
+        );
+        let (reloaded, report) = Config::load(&path);
+        assert_eq!(report.source, LoadSource::File, "the file is valid again");
+        assert_eq!(reloaded, Config::default());
+        assert!(
+            messages.iter().any(|m| m.contains(".bad")),
+            "the backup location is logged: {messages:?}"
+        );
     }
 }

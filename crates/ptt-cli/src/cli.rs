@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Result};
 use ptt_core::audio::{pick_device, DeviceInfo, MicController, DEFAULT_DEVICE};
+use ptt_core::config::Overrides;
 use ptt_core::input::{Binding, MouseButton};
 
 pub const USAGE: &str = "\
@@ -58,6 +59,19 @@ pub struct PttSpec {
     /// `Some(false)` when `--no-swallow` was given: let the bound input
     /// reach other windows too (plan §1).
     pub swallow: Option<bool>,
+}
+
+/// The parsed flags become the overrides `Config::resolve` applies on top of
+/// `config.toml` (plan §8: the file is the source of truth).
+impl From<&PttSpec> for Overrides {
+    fn from(spec: &PttSpec) -> Self {
+        Self {
+            device: spec.device.clone(),
+            binding: spec.binding,
+            release_delay_ms: spec.release_delay_ms,
+            swallow: spec.swallow,
+        }
+    }
 }
 
 /// Plan §8 range for `release_delay_ms`.
@@ -512,5 +526,47 @@ mod tests {
         assert_eq!(out.matches("(default)").count(), 1);
         let default_line = out.lines().find(|l| l.contains("(default)")).unwrap();
         assert!(default_line.contains("Laptop Microphone"));
+    }
+
+    // --- flags -> overrides (plan §8) -------------------------------------
+
+    fn spec_of(argv: &[&str]) -> crate::cli::PttSpec {
+        match parse(&args(argv)).expect("parses") {
+            Command::Ptt(spec) => spec,
+            other => panic!("expected the ptt command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_parsed_flags_become_config_overrides() {
+        let spec = spec_of(&[
+            "ptt",
+            "--key",
+            "0x41",
+            "--device",
+            "flag-device",
+            "--release-delay",
+            "0",
+            "--no-swallow",
+        ]);
+
+        assert_eq!(
+            Overrides::from(&spec),
+            Overrides {
+                device: Some("flag-device".into()),
+                binding: Some(Binding::Key { vk: 0x41, scan: 0 }),
+                release_delay_ms: Some(0),
+                swallow: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn no_flags_means_the_config_file_decides() {
+        assert_eq!(
+            Overrides::from(&spec_of(&["ptt"])),
+            Overrides::default(),
+            "an empty override layer is exactly what the file gets"
+        );
     }
 }

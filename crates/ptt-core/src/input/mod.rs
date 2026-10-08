@@ -100,6 +100,17 @@ impl Binding {
             Self::Mouse(_) => None,
         }
     }
+
+    /// A bare Shift/Ctrl/Alt/Win cannot be *held* to talk — you need those
+    /// fingers for everything else — so "press any key" (plan §9 M4) skips it
+    /// and waits for a real key. Mouse buttons are always bindable.
+    pub fn is_modifier(&self) -> bool {
+        match self {
+            // Shift, Control, Menu/Alt, LWin, RWin and their extended forms.
+            Self::Key { vk, .. } => matches!(*vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5),
+            Self::Mouse(_) => false,
+        }
+    }
 }
 
 /// Press / release of the bound input (plan §4).
@@ -209,5 +220,21 @@ mod tests {
         assert_eq!(caps_lock().button_name(), None);
         assert_eq!(caps_lock().vk(), Some(0x14));
         assert_eq!(Binding::Mouse(MouseButton::X1).vk(), None);
+    }
+
+    #[test]
+    fn a_bare_modifier_is_never_a_hold_to_talk_binding() {
+        for vk in [0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA3, 0xA5] {
+            assert!(
+                Binding::Key { vk, scan: 0 }.is_modifier(),
+                "vk {vk:#x} cannot be held to talk"
+            );
+        }
+        assert!(
+            !caps_lock().is_modifier(),
+            "Caps Lock is plan §8's own example"
+        );
+        assert!(!Binding::Key { vk: 0x41, scan: 0 }.is_modifier(), "A");
+        assert!(!Binding::Mouse(MouseButton::X1).is_modifier());
     }
 }

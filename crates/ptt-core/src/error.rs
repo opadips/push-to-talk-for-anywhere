@@ -32,6 +32,10 @@ pub enum Error {
     #[cfg(windows)]
     #[error("Windows audio API error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// The session worker thread died outside its own error handling.
+    #[error("the session worker stopped: {0}")]
+    Worker(String),
 }
 
 /// Crate-wide result alias.

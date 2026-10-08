@@ -11,4 +11,5 @@ pub mod engine;
 pub mod error;
 pub mod failsafe;
 pub mod input;
+pub mod session;
 pub mod state;
