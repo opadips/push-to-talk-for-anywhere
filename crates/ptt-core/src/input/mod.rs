@@ -162,10 +162,36 @@ fn key_name(vk: u16) -> String {
         0x5D => "Context Menu".to_string(),
         0x90 => "Num Lock".to_string(),
         0x91 => "Scroll Lock".to_string(),
+        // Left/right modifiers (never bindable, but they have names).
+        0xA0 => "Left Shift".to_string(),
+        0xA1 => "Right Shift".to_string(),
+        0xA2 => "Left Ctrl".to_string(),
+        0xA3 => "Right Ctrl".to_string(),
+        0xA4 => "Left Alt".to_string(),
+        0xA5 => "Right Alt".to_string(),
+        // Punctuation. `=` `,` `-` `.` are the same key on every layout; the
+        // OEM 1–7 codes are *layout dependent*, so they are named by number
+        // with the US-keyboard glyph as a hint, never by the glyph alone.
+        0xBB => "Equals (=)".to_string(),
+        0xBC => "Comma (,)".to_string(),
+        0xBD => "Minus (-)".to_string(),
+        0xBE => "Period (.)".to_string(),
+        0xBA => "OEM 1 (; on US)".to_string(),
+        0xBF => "OEM 2 (/ on US)".to_string(),
+        0xC0 => "OEM 3 (` on US)".to_string(),
+        0xDB => "OEM 4 ([ on US)".to_string(),
+        0xDC => "OEM 5 (\\ on US)".to_string(),
+        0xDD => "OEM 6 (] on US)".to_string(),
+        0xDE => "OEM 7 (' on US)".to_string(),
         // Digits, letters, numpad digits and function keys.
         0x30..=0x39 => ((b'0' + (vk - 0x30) as u8) as char).to_string(),
         0x41..=0x5A => ((b'A' + (vk - 0x41) as u8) as char).to_string(),
         0x60..=0x69 => format!("Numpad {}", vk - 0x60),
+        0x6A => "Numpad *".to_string(),
+        0x6B => "Numpad +".to_string(),
+        0x6D => "Numpad -".to_string(),
+        0x6E => "Numpad .".to_string(),
+        0x6F => "Numpad /".to_string(),
         0x70..=0x87 => format!("F{}", vk - 0x6F),
         _ => format!("Key {vk:#04x}"),
     }
@@ -310,6 +336,18 @@ mod tests {
             Binding::Mouse(MouseButton::X1).label(),
             "Mouse button 4 (back)"
         );
+        // The on-screen keyboard (ui/src/keyboardLayout.ts) offers these.
+        assert_eq!(
+            Binding::Key { vk: 0xBF, scan: 0 }.label(),
+            "OEM 2 (/ on US)"
+        );
+        assert_eq!(
+            Binding::Key { vk: 0xDC, scan: 0 }.label(),
+            "OEM 5 (\\ on US)"
+        );
+        assert_eq!(Binding::Key { vk: 0xBD, scan: 0 }.label(), "Minus (-)");
+        assert_eq!(Binding::Key { vk: 0x6B, scan: 0 }.label(), "Numpad +");
+        assert_eq!(Binding::Key { vk: 0xA1, scan: 0 }.label(), "Right Shift");
         // Something the table does not know still says what it is.
         assert_eq!(Binding::Key { vk: 0xE8, scan: 0 }.label(), "Key 0xe8");
     }

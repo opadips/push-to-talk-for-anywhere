@@ -7,6 +7,7 @@
   import { onDestroy, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import VirtualKeyboard from "./VirtualKeyboard.svelte";
 
   // --- shapes the Rust side serializes (plan §8, §9 M4) -------------------
   type BindingConfig = {
@@ -40,6 +41,8 @@
   let status = $state<UiStatus | null>(null);
   let label = $state("");
   let capturing = $state(false);
+  let pickerOpen = $state(false);
+  let pickerButton = $state<HTMLButtonElement | undefined>();
   let busy = $state(false);
   let notice = $state<string | null>(null);
 
@@ -212,6 +215,28 @@
     }
   }
 
+  // --- the on-screen keyboard ---------------------------------------------
+  //
+  // The same result as pressing the key, reached by clicking it: the picker
+  // hands back a virtual-key code and the draft binding changes exactly as it
+  // does after "press any key". (There is no scan code to give — it is stored
+  // but never matched on, see `onCaptureKey`.)
+  function openPicker() {
+    if (!form || capturing) return;
+    pickerOpen = true;
+  }
+
+  function closePicker() {
+    pickerOpen = false;
+    // Hand the focus back to the button that opened the dialog.
+    queueMicrotask(() => pickerButton?.focus());
+  }
+
+  async function pickKey(vk: number) {
+    closePicker();
+    await applyCaptured({ Key: { vk, scan: 0 } });
+  }
+
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
   function flash(message: string) {
     notice = message;
@@ -247,9 +272,19 @@
       <h2>Hotkey</h2>
       <div class="row">
         <span class="binding">{label}</span>
-        <button onclick={capture} disabled={capturing || busy}>
-          {capturing ? "Press any key or button…" : "Change"}
-        </button>
+        <span class="actions">
+          <button onclick={capture} disabled={capturing || busy}>
+            {capturing ? "Press any key or button…" : "Change"}
+          </button>
+          <button
+            bind:this={pickerButton}
+            onclick={openPicker}
+            disabled={capturing || busy}
+            title="Click the key on an on-screen keyboard instead of pressing it"
+          >
+            On-screen keyboard
+          </button>
+        </span>
       </div>
       <label class="check">
         <input type="checkbox" bind:checked={form.binding.swallow} />
@@ -330,6 +365,15 @@
     </section>
   {:else}
     <p class="placeholder">Loading settings…</p>
+  {/if}
+
+  {#if pickerOpen && form}
+    <VirtualKeyboard
+      selectedVk={form.binding.kind === "key" ? form.binding.vk : null}
+      currentLabel={label}
+      onpick={pickKey}
+      onclose={closePicker}
+    />
   {/if}
 
   <footer>
@@ -430,6 +474,13 @@
   .binding {
     font-size: 1.05rem;
     font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.5rem;
   }
   .check {
     display: flex;

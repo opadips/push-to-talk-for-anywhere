@@ -114,6 +114,15 @@ Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
       Lock", "Mouse button 4 (back)").
 - [ ] A bare modifier (Ctrl, Shift, Alt, Win alone) is not accepted as a
       binding — capture keeps waiting until a real key/button arrives.
+- [ ] Settings window: **On-screen keyboard** opens a keyboard; clicking a key
+      closes it and the label updates (e.g. "A", "F9"); Save, then hold that
+      key — the mic unmutes. The currently bound key is highlighted green.
+- [ ] On-screen keyboard: Shift / Ctrl / Alt / Win keys are greyed out and do
+      nothing when clicked; Esc, ✕ or a click outside closes it without
+      changing the binding; Tab stays inside the dialog.
+- [ ] On-screen keyboard, Numpad tab: Numpad 0–9 bind with Num Lock **on**
+      (label "Numpad 5"); punctuation keys show as "OEM n (…)" and bind the key
+      that is physically there on a non-US layout too.
 - [ ] Device dropdown lists the mics (plus "System default") and the
       selection survives Save + restart.
 - [ ] Release delay slider (0–2000 ms): hold the key, release — the mic stays
