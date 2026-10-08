@@ -8,6 +8,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import VirtualKeyboard from "./VirtualKeyboard.svelte";
+  import { isShiftCtrlAltVk } from "./keyboardLayout";
 
   // --- shapes the Rust side serializes (plan §8, §9 M4) -------------------
   type BindingConfig = {
@@ -48,6 +49,15 @@
 
   let dirty = $derived(
     !!form && !!settings && JSON.stringify(form) !== JSON.stringify(settings),
+  );
+
+  // Blocking Shift/Ctrl/Alt from other applications would break them
+  // everywhere (Ctrl+C, capital letters …), so say so next to the checkbox.
+  let blocksModifier = $derived(
+    !!form &&
+      form.binding.kind === "key" &&
+      form.binding.swallow &&
+      isShiftCtrlAltVk(form.binding.vk),
   );
 
   let stateLabel = $derived(
@@ -187,8 +197,9 @@
     // The press that clicked "Change" may still be auto-repeating.
     if (event.repeat || event.isComposing) return;
     const vk = event.keyCode;
-    // A bare modifier cannot be held to talk (the core refuses it too):
-    // keep waiting for a real key.
+    // A bare modifier is skipped here (and by the core's capture): the page
+    // cannot tell left from right, and a chord must not bind its first key.
+    // Shift/Ctrl/Alt are bound from the on-screen keyboard instead.
     if (!vk || vk === VK_IME || MODIFIER_VKS.has(vk)) return;
     endCapture(true);
     // The page has no scan code. It is stored but never matched on — the
@@ -290,6 +301,12 @@
         <input type="checkbox" bind:checked={form.binding.swallow} />
         Also block the key from other applications
       </label>
+      {#if blocksModifier}
+        <p class="warn">
+          This key is Shift, Ctrl or Alt: blocking it stops it working in every program. Untick
+          the box above unless that is what you want.
+        </p>
+      {/if}
     </section>
 
     <section>
@@ -476,6 +493,16 @@
     font-weight: 600;
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+  .warn {
+    margin: 0.6rem 0 0;
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    background: #2b2616;
+    border: 1px solid #5d4e1f;
+    color: #f0dca0;
+    font-size: 0.82rem;
+    line-height: 1.35;
   }
   .actions {
     display: flex;

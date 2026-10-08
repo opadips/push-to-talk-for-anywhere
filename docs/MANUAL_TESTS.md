@@ -117,9 +117,13 @@ Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
 - [ ] Settings window: **On-screen keyboard** opens a keyboard; clicking a key
       closes it and the label updates (e.g. "A", "F9"); Save, then hold that
       key — the mic unmutes. The currently bound key is highlighted green.
-- [ ] On-screen keyboard: Shift / Ctrl / Alt / Win keys are greyed out and do
-      nothing when clicked; Esc, ✕ or a click outside closes it without
-      changing the binding; Tab stays inside the dialog.
+- [ ] On-screen keyboard: the Win keys are greyed out and do nothing when
+      clicked; Esc, ✕ or a click outside closes it without changing the
+      binding; Tab stays inside the dialog.
+- [ ] On-screen keyboard: pick Left Ctrl / Left Shift / Left Alt (and the right
+      ones), Save, hold it — the mic unmutes. With "Also block the key" on, a
+      yellow warning appears; with it off, the key keeps working elsewhere.
+      (Right Alt may act as AltGr on some layouts.)
 - [ ] On-screen keyboard, Numpad tab: Numpad 0–9 bind with Num Lock **on**
       (label "Numpad 5"); punctuation keys show as "OEM n (…)" and bind the key
       that is physically there on a non-US layout too.

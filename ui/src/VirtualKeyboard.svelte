@@ -9,7 +9,7 @@
     MAIN_ROWS,
     MAIN_UNITS,
     NUMPAD,
-    isModifierVk,
+    isBlockedVk,
     isSpacer,
     type KeyDef,
   } from "./keyboardLayout";
@@ -39,7 +39,7 @@
   const span = (units: number) => Math.round(units * 4);
 
   function pick(key: KeyDef) {
-    if (isModifierVk(key.vk)) return;
+    if (isBlockedVk(key.vk)) return;
     onpick(key.vk);
   }
 
@@ -53,8 +53,8 @@
   }
 
   function describe(key: KeyDef): string {
-    return isModifierVk(key.vk)
-      ? `${nameOf(key)} — a modifier cannot be held to talk`
+    return isBlockedVk(key.vk)
+      ? `${nameOf(key)} — the Windows keys cannot be used`
       : nameOf(key);
   }
 
@@ -174,21 +174,23 @@
       <span class="current">Now: <strong>{currentLabel || "—"}</strong></span>
     </footer>
     <p class="note">
-      Greyed-out modifier keys cannot be held to talk. Punctuation keys are drawn for a US
-      keyboard; on other layouts they follow your layout. For a mouse button use “Change”.
+      Shift, Ctrl and Alt can be used — switch off “Also block the key from other
+      applications” for them. The greyed-out Windows keys cannot. Punctuation keys are drawn
+      for a US keyboard; on other layouts they follow your layout. For a mouse button use
+      “Change”.
     </p>
   </div>
 </div>
 
 {#snippet keycap(key: KeyDef, columns: number)}
-  {@const modifier = isModifierVk(key.vk)}
+  {@const blocked = isBlockedVk(key.vk)}
   <div class="slot" style:grid-column={columns ? `span ${columns}` : undefined}>
     <button
       class="key"
       class:selected={key.vk === selectedVk}
-      class:modifier
+      class:blocked
       class:wide={key.label.length > 1}
-      disabled={modifier}
+      disabled={blocked}
       aria-label={nameOf(key)}
       aria-pressed={key.vk === selectedVk}
       title={describe(key)}
@@ -346,7 +348,7 @@
     border-color: #3d8a59;
     color: #fff;
   }
-  .key.modifier {
+  .key.blocked {
     color: #5f6368;
     background: #1a1d22;
     border-color: #262a30;

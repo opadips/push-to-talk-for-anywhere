@@ -121,9 +121,12 @@ impl Binding {
         }
     }
 
-    /// A bare Shift/Ctrl/Alt/Win cannot be *held* to talk — you need those
-    /// fingers for everything else — so "press any key" (plan §9 M4) skips it
-    /// and waits for a real key. Mouse buttons are always bindable.
+    /// A bare Shift/Ctrl/Alt/Win is skipped by "press any key" (plan §9 M4),
+    /// so a shortcut chord cannot bind its first key by accident; it waits
+    /// for a real key. It is only about *capturing*: the settings window's
+    /// on-screen keyboard can still bind the left/right Shift, Ctrl and Alt
+    /// keys (`0xA0..=0xA5`, what the hook reports) on purpose. Mouse buttons
+    /// are always bindable.
     pub fn is_modifier(&self) -> bool {
         match self {
             // Shift, Control, Menu/Alt, LWin, RWin and their extended forms.

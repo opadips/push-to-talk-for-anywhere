@@ -31,18 +31,22 @@ export function isSpacer(cell: Cell): cell is Spacer {
   return "gap" in cell;
 }
 
-/// A bare modifier cannot be *held* to talk — you need those fingers for
-/// everything else — so the core refuses it (`Binding::is_modifier`). The
-/// picker shows these keys but does not let you pick them.
-export function isModifierVk(vk: number): boolean {
-  return (
-    vk === 0x10 || // Shift
-    vk === 0x11 || // Ctrl
-    vk === 0x12 || // Alt
-    vk === 0x5b || // Left Windows
-    vk === 0x5c || // Right Windows
-    (vk >= 0xa0 && vk <= 0xa5) // left/right Shift, Ctrl, Alt
-  );
+/// Keys the picker shows but does not let you pick: the two Windows keys. A
+/// tap on them opens the Start menu and they carry system shortcuts.
+///
+/// Shift, Ctrl and Alt *can* be picked here — always as the left/right
+/// variant (0xA0–0xA5), which is what the low-level hook reports; the generic
+/// 0x10–0x12 codes never reach it, so a binding to one would never fire.
+/// ("Press any key" still skips all modifiers, so a shortcut chord cannot
+/// bind one by accident.)
+export function isBlockedVk(vk: number): boolean {
+  return vk === 0x5b || vk === 0x5c;
+}
+
+/// Left/right Shift, Ctrl and Alt. Bound with "Also block the key from other
+/// applications" on, such a key would stop working in every program.
+export function isShiftCtrlAltVk(vk: number): boolean {
+  return vk >= 0xa0 && vk <= 0xa5;
 }
 
 const k = (vk: number, label: string, w = 1, name?: string): KeyDef => ({ vk, label, w, name });
