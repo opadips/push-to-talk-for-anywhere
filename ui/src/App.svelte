@@ -59,10 +59,19 @@
 
   let unlisten: (() => void) | null = null;
 
+  /// Copy the config for the draft form. `$state` hands back a reactive
+  /// Proxy, and `structuredClone` refuses to clone proxies
+  /// (`DataCloneError: #<Object> could not be cloned` — verified against V8,
+  /// the WebView2 engine) while JSON is exactly the shape these values
+  /// have. Used everywhere a config object is duplicated or sent.
+  function clone<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+
   onMount(async () => {
     try {
       settings = await invoke<Config>("get_settings");
-      form = structuredClone(settings);
+      form = clone(settings);
       devices = await invoke<DeviceInfo[]>("get_devices").catch(() => []);
       status = await invoke<UiStatus>("get_status");
       label = await labelFor(form);
@@ -83,7 +92,7 @@
   onDestroy(() => unlisten?.());
 
   async function labelFor(config: Config): Promise<string> {
-    return invoke<string>("binding_label", { settings: config }).catch(() => "…");
+    return invoke<string>("binding_label", { settings: clone(config) }).catch(() => "…");
   }
 
   async function save() {
@@ -92,14 +101,13 @@
     try {
       // Sliders are typed as numbers, but a `<select>`/`<input>` hand-back
       // can arrive as a string — send numbers for sure, the config is
-      // strict about types (plan §8).
-      const payload: Config = {
-        ...form,
-        audio: { ...form.audio, release_delay_ms: Number(form.audio.release_delay_ms) },
-        sounds: { ...form.sounds, volume: Number(form.sounds.volume) },
-      };
+      // strict about types (plan §8). `clone` also turns the `$state`
+      // proxies into plain objects on the way out.
+      const payload = clone(form);
+      payload.audio.release_delay_ms = Number(payload.audio.release_delay_ms);
+      payload.sounds.volume = Number(payload.sounds.volume);
       settings = await invoke<Config>("save_settings", { settings: payload });
-      form = structuredClone(settings);
+      form = clone(settings);
       label = await labelFor(form);
       flash("Saved");
     } catch (error) {
