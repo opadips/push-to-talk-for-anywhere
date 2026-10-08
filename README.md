@@ -1,10 +1,38 @@
-# Push-to-Talk for Windows
+# Push-to-Talk for Anywhere
 
 A small tray app that keeps your microphone muted and only unmutes it while you
-hold a key (or a mouse button). Works in whatever has focus — Discord, a browser
-call, a fullscreen game. Mic goes back to muted when you let go.
+hold a key (or a mouse button). Whatever you're in — a browser tab, a game, a
+stream — the mic opens when you press and closes when you let go.
 
-Windows 10/11, x64. No account, no installer nonsense, no network access.
+**Why you'd want it:**
+
+- **Mic off by default.** No more hot-mic moments — the mic is muted until your
+  finger is on the key, and back to muted the instant you're done.
+- **One key works everywhere.** Same hold-to-talk in every app, even ones that
+  have no push-to-talk setting at all.
+- **Doesn't clip your words.** A short release delay keeps the last syllable
+  from getting cut off (default 200 ms, adjustable).
+- **Your key, your call.** Any keyboard key or mouse button, including side
+  buttons. Optionally swallow it so it never reaches other apps.
+- **You can hear it.** Optional start/stop sound cues with a volume slider, so
+  you always know when you're live.
+- **Leaves things as it found them.** Mute state is handed back on quit.
+
+## What people use it for
+
+- **Web-based meetings** — Google Meet, Teams and Zoom in a browser tab rarely
+  give you a push-to-talk key. Now you have one, no extension needed.
+- **Games without built-in push-to-talk** — plenty of co-op and multiplayer
+  games only offer "mic always on". Hold a key instead of muting your system mic
+  by hand.
+- **Streamers on OBS** — cut the mic between takes, during coughs or keyboard
+  pauses, without touching OBS. Works alongside your existing OBS mic settings.
+- **Screen sharing** — kill the mic instantly while sharing your screen, without
+  hunting for the right mute button in the right app.
+- **Quiet rooms** — kids, pets, keyboard clack: mute the noise between
+  sentences instead of staying muted the whole call.
+- **Apps with no mute** — old VOIP clients and web apps that expose no mic
+  control at all. The system mic is fair game, so anything can get push-to-talk.
 
 ## Getting it
 
@@ -13,6 +41,10 @@ program) from the [Releases](https://github.com/opadips/push-to-talk-for-anywher
 page. Unzip, run `ptt-tool.exe`. That's it.
 
 There's a `SHA256SUMS.txt` next to the files if you want to check them.
+
+If the window you're talking into runs with **higher privileges** (an elevated /
+administrator app), run `ptt-tool.exe` as administrator too — otherwise Windows
+blocks the hotkey and it won't respond while that window has focus.
 
 Heads up: the app installs a global keyboard hook, which some antivirus tools
 and anti-cheat systems find suspicious. Nothing shady is going on, see Privacy
@@ -98,21 +130,6 @@ Manual test checklist is in [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).
 Cutting a release: [docs/RELEASING.md](docs/RELEASING.md) (GitHub Actions does
 the work).
 
-## Limitations
-
-- **Elevated windows.** A normal process can't see input while an admin window
-  has focus, so the hotkey won't fire there. That's Windows (UIPI), not a bug.
-- **Anti-cheat.** Global hooks upset some of them. Test your games and report
-  what happens.
-- **Mute resets.** A few drivers/apps stomp the mute state on their own. Not
-  defended against yet.
-
-## Fail-safe
-
-The worst outcome would be leaving your mic stuck muted (or stuck open), so the
-app records the original mute state on start and restores it on quit, disable,
-panic, or Ctrl+C. If it gets killed, the next launch notices and fixes it.
-
 ## Privacy
 
 No network access anywhere. No telemetry. The hook compares your input against
@@ -121,4 +138,4 @@ stored.
 
 ## License
 
-MIT OR Apache-2.0, as declared in `Cargo.toml`.
+MIT. See [LICENSE](LICENSE).
