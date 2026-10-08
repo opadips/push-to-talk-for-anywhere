@@ -71,8 +71,11 @@ pub async fn capture_binding(app: AppHandle) -> Result<Binding, String> {
     let captured = {
         let state = app.state::<AppState>();
         let session = state.session.lock().unwrap();
+        // A finished worker cannot arm the hook, so refuse here rather than
+        // wait forever for a key that will never be reported.
         session
             .as_ref()
+            .filter(|session| !session.finished())
             .map(|session| session.capture())
             .ok_or_else(|| "the session is not running — check the tray menu".to_string())?
     };

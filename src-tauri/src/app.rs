@@ -226,14 +226,21 @@ pub fn set_enabled(state: &AppState, enabled: bool) -> Result<(), String> {
     }
 
     // Apply it — live if a session is running, by starting one otherwise.
-    let start_needed = match state.session.lock().unwrap().as_ref() {
-        Some(session) => {
+    // A session that died on an engine failure restarts here too: the M4
+    // ruling is "the next enable/rebind restarts it".
+    let needs_start = match state.session.lock().unwrap().as_ref() {
+        Some(session) if !session.finished() => {
             session.set_enabled(enabled);
             false
         }
-        None => true,
+        // `None`, or a worker that already stopped (its handle is left in
+        // place until someone takes it).
+        Some(_) | None => true,
     };
-    if start_needed {
+    if needs_start {
+        if let Err(error) = stop_session(state) {
+            warn!("stopping the finished session: {error}");
+        }
         start_session(state)?;
     }
     Ok(())
@@ -332,6 +339,7 @@ pub fn list_devices(config: &Config) -> Result<Vec<ptt_core::audio::DeviceInfo>,
     #[cfg(windows)]
     {
         use ptt_core::audio::wasapi::WasapiController;
+        use ptt_core::audio::MicController;
         // `new` only records the id: listing works even if that device is
         // currently unplugged, which is exactly when the user needs the list.
         WasapiController::new(config.audio.device_id.clone())
