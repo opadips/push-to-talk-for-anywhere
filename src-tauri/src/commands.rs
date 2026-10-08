@@ -97,3 +97,14 @@ pub async fn capture_binding(app: AppHandle) -> Result<Binding, String> {
             "the session stopped before a key was pressed".to_string()
         })
 }
+
+/// The window found the key itself (see `capture()` in the settings UI), so
+/// the global capture must stop waiting — otherwise the hook would keep
+/// swallowing the next key or mouse button the user presses anywhere.
+/// Harmless when nothing is armed.
+#[tauri::command]
+pub fn cancel_capture(state: State<'_, AppState>) {
+    if let Some(session) = state.session.lock().unwrap().as_ref() {
+        session.cancel_capture();
+    }
+}

@@ -89,7 +89,10 @@
     }
   });
 
-  onDestroy(() => unlisten?.());
+  onDestroy(() => {
+    unlisten?.();
+    window.removeEventListener("keydown", onCaptureKey, true);
+  });
 
   async function labelFor(config: Config): Promise<string> {
     return invoke<string>("binding_label", { settings: clone(config) }).catch(() => "…");
@@ -126,28 +129,86 @@
     }
   }
 
-  /// "Press any key" (plan §9 M4): the hook answers with whatever is
-  /// pressed next; the button is disabled meanwhile so only one capture
-  /// can be outstanding.
-  async function capture() {
+  // --- "press any key" (plan §9 M4) --------------------------------------
+  //
+  // Two listeners race, and the first answer wins:
+  //
+  //  * KEYS are read by this page. While a capture is running the settings
+  //    window is the one that has the keyboard focus, so a plain DOM
+  //    `keydown` always sees the press. The global low-level hook cannot be
+  //    relied on for this: it was observed not to deliver key presses while
+  //    WebView2 owned the focus, and the raw-input fallback added for that
+  //    rejected every key report (see hook.rs).
+  //  * MOUSE BUTTONS come from the backend (`capture_binding`): the global
+  //    hook sees them anywhere on screen, including the side buttons.
+  //
+  // WebView2 is Chromium on Windows, where `KeyboardEvent.keyCode` is the
+  // Windows virtual-key code — the very number the hook reports as `vkCode`
+  // and `config.toml` stores as `vk`. (`keyCode` is deprecated in the spec but
+  // it is the only way a page can get a VK.)
+  const MODIFIER_VKS = new Set([16, 17, 18, 91, 92]); // Shift, Ctrl, Alt, Win
+  const VK_IME = 229; // "a key went to the input method" — not a real key
+
+  // Bumped whenever a capture ends, so a late answer from the other
+  // listener (or a request we cancelled) is recognised and ignored.
+  let captureId = 0;
+
+  function endCapture(cancelBackend: boolean) {
+    captureId++;
+    capturing = false;
+    window.removeEventListener("keydown", onCaptureKey, true);
+    // The backend capture is still armed: tell it to stand down, or the hook
+    // would swallow the next key / mouse button the user presses anywhere.
+    if (cancelBackend) invoke("cancel_capture").catch(() => {});
+  }
+
+  async function applyCaptured(captured: Captured) {
     if (!form) return;
+    if ("Key" in captured) {
+      form.binding.kind = "key";
+      form.binding.vk = captured.Key.vk;
+      form.binding.scan = captured.Key.scan;
+      form.binding.mouse_button = "";
+    } else {
+      form.binding.kind = "mouse";
+      form.binding.mouse_button = String(captured.Mouse).toLowerCase();
+    }
+    label = await labelFor(form);
+  }
+
+  function onCaptureKey(event: KeyboardEvent) {
+    // While capturing, every key belongs to the capture — not to the page
+    // (Tab must not move focus, Enter/Space must not click, F5 must not reload).
+    event.preventDefault();
+    event.stopPropagation();
+    // The press that clicked "Change" may still be auto-repeating.
+    if (event.repeat || event.isComposing) return;
+    const vk = event.keyCode;
+    // A bare modifier cannot be held to talk (the core refuses it too):
+    // keep waiting for a real key.
+    if (!vk || vk === VK_IME || MODIFIER_VKS.has(vk)) return;
+    endCapture(true);
+    // The page has no scan code. It is stored but never matched on — the
+    // hook compares `vk` only — and 0 passes the config validation.
+    void applyCaptured({ Key: { vk, scan: 0 } });
+  }
+
+  async function capture() {
+    if (!form || capturing) return;
+    const id = ++captureId;
     capturing = true;
+    window.addEventListener("keydown", onCaptureKey, true);
     try {
       const captured = await invoke<Captured>("capture_binding");
-      if ("Key" in captured) {
-        form.binding.kind = "key";
-        form.binding.vk = captured.Key.vk;
-        form.binding.scan = captured.Key.scan;
-        form.binding.mouse_button = "";
-      } else {
-        form.binding.kind = "mouse";
-        form.binding.mouse_button = String(captured.Mouse).toLowerCase();
-      }
-      label = await labelFor(form);
+      if (id !== captureId) return; // the page already answered (or cancelled)
+      endCapture(false);
+      await applyCaptured(captured);
     } catch (error) {
-      flash(String(error));
-    } finally {
-      capturing = false;
+      // A request we cancelled ourselves ends with an error: not news.
+      if (id === captureId) {
+        endCapture(false);
+        flash(String(error));
+      }
     }
   }
 

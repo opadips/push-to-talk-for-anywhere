@@ -190,6 +190,10 @@ pub trait InputSource {
     /// "Press a key to bind" mode: yields the next input and does not forward
     /// it (plan §4).
     fn capture_next(&mut self) -> Receiver<Binding>;
+    /// Abandon an outstanding [`InputSource::capture_next`] without waiting
+    /// for a press — the settings window answered by itself, or was closed.
+    /// Afterwards nothing may keep consuming the user's next key press.
+    fn cancel_capture(&mut self) {}
     fn stop(&mut self);
 }
 

@@ -54,6 +54,8 @@ pub enum Command {
     Rebind { binding: Binding, swallow: bool },
     /// "Press any key": the next press answers on this channel.
     Capture(Sender<Binding>),
+    /// The window found the key itself (or went away): disarm the capture.
+    CancelCapture,
     /// Stop: take the hooks down and hand the microphone back.
     Quit,
 }
@@ -154,6 +156,12 @@ impl SessionHandle {
         let (tx, rx) = channel();
         let _ = self.commands.send(Command::Capture(tx));
         rx
+    }
+
+    /// Disarm an outstanding [`SessionHandle::capture`]. Its receiver then
+    /// disconnects instead of answering.
+    pub fn cancel_capture(&self) {
+        let _ = self.commands.send(Command::CancelCapture);
     }
 
     /// What the tray icon and the settings window render right now.
@@ -296,6 +304,13 @@ fn pump<C: MicController, S: InputSource>(
                 Ok(Command::Capture(reply)) => {
                     info!("capture armed: the next key press becomes the binding");
                     capture = Some((source.capture_next(), reply));
+                }
+                Ok(Command::CancelCapture) => {
+                    // Dropping `reply` disconnects whoever waits for it.
+                    if capture.take().is_some() {
+                        info!("capture cancelled by the owner");
+                        source.cancel_capture();
+                    }
                 }
                 Ok(Command::Quit) => return Ok(()),
                 Err(TryRecvError::Empty) => break,
@@ -491,6 +506,10 @@ mod tests {
             let (tx, rx) = channel();
             *self.pending_capture.lock().unwrap() = Some(tx);
             rx
+        }
+
+        fn cancel_capture(&mut self) {
+            *self.pending_capture.lock().unwrap() = None;
         }
 
         fn stop(&mut self) {
@@ -689,6 +708,66 @@ mod tests {
             captured.recv_timeout(Duration::from_secs(2)).unwrap(),
             Binding::Key { vk: 0x14, scan: 0 }
         );
+        session.stop().unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_capture_disarms_the_source_and_frees_the_waiter() {
+        let mic = SharedMic::default();
+        let source = FakeSource::default();
+        let session = SessionHandle::start(
+            config(0),
+            mic.clone(),
+            source.clone(),
+            scratch("cancel"),
+            true,
+        )
+        .unwrap();
+
+        let captured = session.capture();
+        assert!(
+            wait_until(|| source.capturing()),
+            "the hook waits for a key"
+        );
+
+        session.cancel_capture();
+        assert!(
+            wait_until(|| !source.capturing()),
+            "nothing keeps waiting to swallow the user's next key"
+        );
+        assert!(
+            matches!(
+                captured.recv_timeout(Duration::from_secs(2)),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "the window's pending request ends instead of hanging"
+        );
+
+        // A later capture still works.
+        let again = session.capture();
+        assert!(wait_until(|| source.capturing()));
+        source.answer_capture(Binding::Key { vk: 0x41, scan: 0 });
+        assert_eq!(
+            again.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Binding::Key { vk: 0x41, scan: 0 }
+        );
+        session.stop().unwrap();
+    }
+
+    #[test]
+    fn cancelling_without_a_capture_is_harmless() {
+        let source = FakeSource::default();
+        let session = SessionHandle::start(
+            config(0),
+            SharedMic::default(),
+            source.clone(),
+            scratch("cancel-idle"),
+            true,
+        )
+        .unwrap();
+        session.cancel_capture();
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(!session.finished());
         session.stop().unwrap();
     }
 

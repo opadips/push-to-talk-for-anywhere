@@ -50,6 +50,7 @@ fn main() {
             commands::save_settings,
             commands::set_enabled,
             commands::capture_binding,
+            commands::cancel_capture,
         ])
         // Closing the settings window only hides it: the session keeps
         // running from the tray (plan §9 M4).

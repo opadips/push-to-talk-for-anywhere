@@ -21,7 +21,7 @@ use windows::Win32::System::RemoteDesktop::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
+    RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
@@ -178,6 +178,13 @@ impl InputSource for HookInputSource {
         rx
     }
 
+    fn cancel_capture(&mut self) {
+        // Nothing may keep eating the next key press once nobody is waiting
+        // for it (the window answered by itself, or it was closed).
+        shared().capture_tx = None;
+        remove_raw_keyboard();
+    }
+
     fn stop(&mut self) {
         if let Some(thread) = self.thread.take() {
             let id = HOOK_THREAD.load(Ordering::SeqCst);
@@ -217,10 +224,14 @@ fn hook_thread(ready: Sender<Result<()>>) {
     // "ready" so a capture armed immediately afterwards already has the
     // raw-input target (bug 3).
     let window = unsafe { create_notify_window() }.ok();
+    // Stored *before* `ready` is sent: a capture armed right after start-up
+    // must already find the raw-input target.
+    if let Some(hwnd) = window {
+        NOTIFY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+    }
     let _ = ready.send(Ok(()));
 
     if let Some(hwnd) = window {
-        NOTIFY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         // Not fatal: the session keeps running, only re-installation is lost.
         let _ = unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
     }
@@ -414,14 +425,24 @@ unsafe fn raw_keyboard_binding(lparam: LPARAM) -> Option<Binding> {
             header,
         )
     };
-    if read == u32::MAX || (read as usize) < std::mem::size_of::<RAWINPUT>() {
+    // A keyboard report is `RAWINPUTHEADER + RAWKEYBOARD` — 40 bytes on
+    // 64-bit Windows. `size_of::<RAWINPUT>()` is the *union* (sized for its
+    // largest member, the mouse report) and is 48, so comparing against it
+    // rejected every single keyboard report and left this fallback dead.
+    let data_offset = std::mem::offset_of!(RAWINPUT, data);
+    let needed = data_offset + std::mem::size_of::<RAWKEYBOARD>();
+    if read == u32::MAX || (read as usize) < needed || buffer.len() < needed {
         return None;
     }
-    let raw = unsafe { &*buffer.as_ptr().cast::<RAWINPUT>() };
-    if raw.header.dwType != RIM_TYPEKEYBOARD.0 {
+    // Copy the two parts out by value instead of viewing the buffer as a
+    // `&RAWINPUT`: the buffer is a byte `Vec` that is smaller than a whole
+    // `RAWINPUT` (and not necessarily aligned for one).
+    let header = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<RAWINPUTHEADER>()) };
+    if header.dwType != RIM_TYPEKEYBOARD.0 {
         return None;
     }
-    let keyboard = unsafe { raw.data.keyboard };
+    let keyboard =
+        unsafe { std::ptr::read_unaligned(buffer.as_ptr().add(data_offset).cast::<RAWKEYBOARD>()) };
     raw_binding(
         keyboard.VKey,
         keyboard.MakeCode,
@@ -517,10 +538,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let mut shared = shared();
 
     // "Press a key to bind" mode: the input becomes the binding and never
-    // reaches another window (plan §4).
-    if let Some(tx) = shared.capture_tx.take() {
-        let _ = tx.send(Binding::Key { vk, scan });
-        return LRESULT(1);
+    // reaches another window (plan §4). Only a *press* counts: the release
+    // of the key that armed the capture (Enter/Space on the "Change" button)
+    // would otherwise be taken for the answer.
+    if pressed {
+        if let Some(tx) = shared.capture_tx.take() {
+            let _ = tx.send(Binding::Key { vk, scan });
+            return LRESULT(1);
+        }
     }
 
     let Some(binding) = shared.binding else {
@@ -635,6 +660,23 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the fallback compared the byte count `GetRawInputData`
+    /// returns for a keyboard report against `size_of::<RAWINPUT>()`. A
+    /// keyboard report is header + `RAWKEYBOARD`; `RAWINPUT` is the union
+    /// sized for the bigger mouse report. The old guard could never pass.
+    #[test]
+    fn a_keyboard_report_is_smaller_than_the_whole_rawinput_union() {
+        let data_offset = std::mem::offset_of!(RAWINPUT, data);
+        let keyboard_report = data_offset + std::mem::size_of::<RAWKEYBOARD>();
+        assert!(
+            keyboard_report < std::mem::size_of::<RAWINPUT>(),
+            "{keyboard_report} must be < {} — the old guard rejected every key",
+            std::mem::size_of::<RAWINPUT>()
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!((keyboard_report, std::mem::size_of::<RAWINPUT>()), (40, 48));
+    }
 
     #[test]
     fn a_raw_press_is_the_binding_and_a_release_is_nothing() {
