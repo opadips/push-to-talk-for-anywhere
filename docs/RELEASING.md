@@ -22,7 +22,8 @@ The very first release (no `v*` tag yet) uses the version already in
 2. Builds the UI, then runs the same checks as CI: `cargo fmt --check`,
    `cargo clippy -D warnings`, `cargo test`.
 3. `cargo build --release --locked`, then packs
-   `ptt-tool-vX.Y.Z-windows-x64.zip` (`ptt-tool.exe`, `ptt.exe`, README),
+   `ptt-tool-vX.Y.Z-windows-x64.zip` (`push-to-talk-for-anywhere.exe`,
+   `ptt.exe`, README),
    the bare `ptt-tool-vX.Y.Z-windows-x64.exe` and `SHA256SUMS.txt`.
 4. Only if all of that passed: commits `Release vX.Y.Z` (the version bump) to
    the branch, then creates the `vX.Y.Z` tag on that commit and the GitHub

@@ -38,12 +38,12 @@ stream — the mic opens when you press and closes when you let go.
 
 Download `ptt-tool-vX.Y.Z-windows-x64.zip` (or the plain `.exe`, it's the same
 program) from the [Releases](https://github.com/opadips/push-to-talk-for-anywhere/releases)
-page. Unzip, run `ptt-tool.exe`. That's it.
+page. Unzip, run `push-to-talk-for-anywhere.exe`. That's it.
 
 There's a `SHA256SUMS.txt` next to the files if you want to check them.
 
 If the window you're talking into runs with **higher privileges** (an elevated /
-administrator app), run `ptt-tool.exe` as administrator too — otherwise Windows
+administrator app), run `push-to-talk-for-anywhere.exe` as administrator too — otherwise Windows
 blocks the hotkey and it won't respond while that window has focus.
 
 Heads up: the app installs a global keyboard hook, which some antivirus tools

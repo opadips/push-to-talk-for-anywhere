@@ -131,7 +131,9 @@ jobs:
         run: |
           name="ptt-tool-v${VERSION}-windows-x64"
           mkdir -p "dist/$name"
-          cp target/release/ptt-tool.exe target/release/ptt.exe README.md "dist/$name/"
+          cp target/release/ptt.exe README.md "dist/$name/"
+          # The tray app ships under the product name; the cargo binary stays ptt-tool.exe.
+          cp target/release/ptt-tool.exe "dist/$name/push-to-talk-for-anywhere.exe"
           # The tray app is one self-contained file; offer it on its own too.
           cp target/release/ptt-tool.exe "dist/${name}.exe"
           powershell -NoProfile -Command "Compress-Archive -Path 'dist/$name/*' -DestinationPath 'dist/$name.zip'"
