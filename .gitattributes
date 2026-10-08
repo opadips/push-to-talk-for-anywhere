@@ -1,0 +1,2 @@
+# Shell scripts run on the Windows CI runner under Git Bash: keep LF endings.
+*.sh text eol=lf
