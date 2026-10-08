@@ -10,6 +10,30 @@ you did not actually observe.
 - Audio device:
 - Date / tester:
 
+## Running the checks
+
+Until the tray UI lands (M4) everything is driven from `ptt.exe` in a
+terminal. Use a release build (`cargo build --release`, or the CI artifact).
+
+```text
+ptt.exe devices                         # list mics (M1)
+ptt.exe status                          # 'muted' / 'unmuted' (M1)
+ptt.exe mute            /  ptt.exe unmute
+
+ptt.exe ptt --key 0x14                  # hold-to-talk on Caps Lock (M2)
+ptt.exe ptt --key 0x14 --no-swallow     # let the key reach other windows
+ptt.exe ptt --key 0x14 --release-delay 0
+ptt.exe ptt --mouse x1                  # bind a side button instead
+ptt.exe ptt --key 0x41 --device {id}    # bind a key, pick the mic
+```
+
+The `ptt` session prints its binding, mutes the mic, and unmutes it while the
+bound input is held. Press **Enter** to quit; it restores the mute state it
+found at start-up.
+
+Start/stop sound cues do not exist until M5, so the sound parts of the
+checklist cannot be observed yet.
+
 ## Checklist
 
 ### Core hold-to-talk (M2)

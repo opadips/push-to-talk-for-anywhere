@@ -16,6 +16,12 @@ pub enum Error {
     #[error("device does not support endpoint mute: {0}")]
     MuteUnsupported(String),
 
+    #[error("invalid mouse button {0:?} (valid: left, right, middle, x1, x2)")]
+    InvalidMouseButton(String),
+
+    #[error("input hook failed: {0}")]
+    InputHook(String),
+
     /// Windows-only: carries the `HRESULT`/message from windows-rs.
     #[cfg(windows)]
     #[error("Windows audio API error: {0}")]
@@ -42,6 +48,14 @@ mod tests {
     fn no_default_device_message_is_actionable() {
         let err = Error::NoDefaultDevice;
         assert_eq!(err.to_string(), "no default capture device available");
+    }
+
+    #[test]
+    fn input_hook_message_names_the_failure() {
+        let err = Error::InputHook("the hook thread exited".into());
+        let message = err.to_string();
+        assert!(message.contains("input hook"), "{message}");
+        assert!(message.contains("the hook thread exited"), "{message}");
     }
 
     #[test]

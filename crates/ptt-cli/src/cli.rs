@@ -5,30 +5,62 @@
 
 use anyhow::{bail, Result};
 use ptt_core::audio::{pick_device, DeviceInfo, MicController, DEFAULT_DEVICE};
+use ptt_core::input::{Binding, MouseButton};
 
 pub const USAGE: &str = "\
-usage: ptt <command> [--device <id>]
+usage: ptt <command> [options]
 
 commands:
   devices           list capture devices (marks the system default)
   mute              mute the microphone
   unmute            unmute the microphone
   status            print 'muted' or 'unmuted'
+  ptt               hold-to-talk: unmute only while the bound input is held
   help              show this help
 
 options:
   --device <id>     use this endpoint id instead of the system default
-                    (run 'ptt devices' to see ids; 'default' follows the system)";
+                    (run 'ptt devices' to see ids; 'default' follows the system)
+
+'ptt' command options:
+  --key <vk>            bind a keyboard key by virtual-key code, e.g. 0x14 (Caps Lock)
+  --mouse <button>      bind a mouse button: left, right, middle, x1 or x2
+  --release-delay <ms>  mute delay after release, 0-2000 (default 200)
+  --no-swallow          also let the bound input reach other windows";
 
 /// A parsed invocation of `ptt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Devices,
-    Mute { device: Option<String> },
-    Unmute { device: Option<String> },
-    Status { device: Option<String> },
+    Mute {
+        device: Option<String>,
+    },
+    Unmute {
+        device: Option<String>,
+    },
+    Status {
+        device: Option<String>,
+    },
+    /// Interactive hold-to-talk session (plan §9, M2).
+    Ptt(PttSpec),
     Help,
 }
+
+/// Arguments of the `ptt ptt` hold-to-talk command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PttSpec {
+    pub device: Option<String>,
+    pub binding: Binding,
+    pub release_delay_ms: u64,
+    /// Consume the bound input so it never reaches other windows (plan §1).
+    pub swallow: bool,
+}
+
+/// Plan §8 range for `release_delay_ms`.
+const MAX_RELEASE_DELAY_MS: u64 = 2000;
+
+/// Plan §8 default.
+const DEFAULT_RELEASE_DELAY_MS: u64 = 200;
 
 /// Parse command-line arguments (everything after argv[0]).
 pub fn parse(args: &[String]) -> Result<Command> {
@@ -45,9 +77,86 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 _ => Command::Status { device },
             })
         }
+        "ptt" => parse_ptt(&args[1..]),
         "help" | "-h" | "--help" => Ok(Command::Help),
         other => bail!("unknown command: {other}\n\n{USAGE}"),
     }
+}
+
+/// Parse the hold-to-talk command: one binding plus its options.
+fn parse_ptt(rest: &[String]) -> Result<Command> {
+    let mut device = None;
+    let mut key: Option<u16> = None;
+    let mut mouse: Option<String> = None;
+    let mut release_delay_ms = DEFAULT_RELEASE_DELAY_MS;
+    let mut swallow = true;
+
+    let mut index = 0;
+    while index < rest.len() {
+        let flag = rest[index].as_str();
+        if flag == "--no-swallow" {
+            swallow = false;
+            index += 1;
+            continue;
+        }
+        let Some(value) = rest.get(index + 1) else {
+            bail!("{flag} requires a value\n\n{USAGE}");
+        };
+        if value.starts_with("--") {
+            bail!("{flag} requires a value\n\n{USAGE}");
+        }
+        match flag {
+            "--device" => device = Some(value.clone()),
+            "--key" => key = Some(parse_vk(value)?),
+            "--mouse" => mouse = Some(value.clone()),
+            "--release-delay" => release_delay_ms = parse_release_delay(value)?,
+            other => bail!("unexpected argument for 'ptt': {other}\n\n{USAGE}"),
+        }
+        index += 2;
+    }
+
+    let binding = match (key, mouse) {
+        (Some(_), Some(_)) => bail!("'ptt' takes either --key or --mouse, not both"),
+        (Some(vk), None) => Binding::Key { vk, scan: 0 },
+        (None, Some(name)) => Binding::Mouse(MouseButton::from_name(&name)?),
+        (None, None) => bail!("'ptt' needs a binding: --key <vk> or --mouse <button>"),
+    };
+
+    Ok(Command::Ptt(PttSpec {
+        device,
+        binding,
+        release_delay_ms,
+        swallow,
+    }))
+}
+
+/// Accept decimal (`20`) and hex (`0x14`) virtual-key codes; 0 is not a key.
+fn parse_vk(value: &str) -> Result<u16> {
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"));
+    let parsed = match hex {
+        Some(hex) => u16::from_str_radix(hex, 16),
+        None => value.parse::<u16>(),
+    };
+    let vk = parsed.map_err(|_| {
+        anyhow::anyhow!("invalid key code {value:?}: use a number such as 20 or 0x14 (Caps Lock)")
+    })?;
+    if vk == 0 {
+        bail!("key code 0 is not a key: use a number such as 20 or 0x14 (Caps Lock)");
+    }
+    Ok(vk)
+}
+
+/// Plan §8: 0–2000 ms.
+fn parse_release_delay(value: &str) -> Result<u64> {
+    let ms = value.parse::<u64>().map_err(|_| {
+        anyhow::anyhow!("invalid release delay {value:?}: use milliseconds, e.g. 200")
+    })?;
+    if ms > MAX_RELEASE_DELAY_MS {
+        bail!("release delay must be 0-{MAX_RELEASE_DELAY_MS} ms, got {ms}");
+    }
+    Ok(ms)
 }
 
 fn parse_device_flag(rest: &[String]) -> Result<Option<String>> {
@@ -73,6 +182,9 @@ pub fn resolve_selection(
 /// Run a parsed command against a controller and return its output.
 pub fn execute(cmd: &Command, ctl: &dyn MicController) -> Result<String> {
     Ok(match cmd {
+        Command::Ptt(_) => {
+            bail!("the hold-to-talk command is interactive: run 'ptt ptt' on its own")
+        }
         Command::Help => USAGE.to_string(),
         Command::Devices => format_devices(&ctl.list_capture_devices()?),
         Command::Mute { device } => {
@@ -218,6 +330,108 @@ mod tests {
         assert!(matches!(parse(&args(&["-h"])), Ok(Command::Help)));
     }
 
+    // --- the hold-to-talk command (plan §9 M2) ---------------------------
+
+    fn spec(cmd: &Command) -> &PttSpec {
+        match cmd {
+            Command::Ptt(spec) => spec,
+            other => panic!("expected the hold-to-talk command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ptt_requires_a_binding() {
+        let err = parse(&args(&["ptt"])).expect_err("no binding given");
+        let message = err.to_string();
+        assert!(message.contains("--key"), "{message}");
+        assert!(message.contains("--mouse"), "{message}");
+    }
+
+    #[test]
+    fn ptt_parses_a_hex_key_with_the_plan_defaults() {
+        let cmd = parse(&args(&["ptt", "--key", "0x14"])).expect("hex vk");
+        assert_eq!(
+            cmd,
+            Command::Ptt(PttSpec {
+                device: None,
+                binding: Binding::Key { vk: 0x14, scan: 0 },
+                release_delay_ms: 200,
+                swallow: true,
+            })
+        );
+    }
+
+    #[test]
+    fn ptt_parses_a_decimal_key() {
+        let cmd = parse(&args(&["ptt", "--key", "41"])).expect("decimal vk");
+        assert_eq!(spec(&cmd).binding, Binding::Key { vk: 41, scan: 0 });
+    }
+
+    #[test]
+    fn ptt_rejects_a_key_code_of_zero() {
+        let err = parse(&args(&["ptt", "--key", "0"])).expect_err("0 is no key");
+        assert!(err.to_string().contains("0x14"), "hints a real code: {err}");
+    }
+
+    #[test]
+    fn ptt_rejects_a_malformed_key_code() {
+        let err = parse(&args(&["ptt", "--key", "capslock"])).expect_err("not a number");
+        assert!(err.to_string().contains("capslock"), "{err}");
+    }
+
+    #[test]
+    fn ptt_parses_a_mouse_button() {
+        let cmd = parse(&args(&["ptt", "--mouse", "x1"])).expect("mouse binding");
+        assert_eq!(spec(&cmd).binding, Binding::Mouse(MouseButton::X1));
+    }
+
+    #[test]
+    fn ptt_rejects_an_unknown_mouse_button() {
+        let err = parse(&args(&["ptt", "--mouse", "thumb"])).expect_err("no such button");
+        assert!(err.to_string().contains("x1"), "lists the buttons: {err}");
+    }
+
+    #[test]
+    fn ptt_rejects_key_and_mouse_together() {
+        let err = parse(&args(&["ptt", "--key", "0x14", "--mouse", "x1"]))
+            .expect_err("ambiguous binding");
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn ptt_release_delay_is_configurable_within_the_plan_range() {
+        let cmd = parse(&args(&["ptt", "--key", "0x14", "--release-delay", "0"]))
+            .expect("zero delay is allowed");
+        assert_eq!(spec(&cmd).release_delay_ms, 0);
+
+        let err = parse(&args(&["ptt", "--key", "0x14", "--release-delay", "2001"]))
+            .expect_err("over the maximum");
+        assert!(err.to_string().contains("2000"), "{err}");
+    }
+
+    #[test]
+    fn ptt_swallows_the_bound_input_unless_told_not_to() {
+        let on = parse(&args(&["ptt", "--key", "0x14"])).expect("parses");
+        assert!(spec(&on).swallow, "swallow is the §8 default");
+        let off = parse(&args(&["ptt", "--key", "0x14", "--no-swallow"])).expect("parses");
+        assert!(!spec(&off).swallow);
+    }
+
+    #[test]
+    fn ptt_accepts_a_device_and_rejects_a_valueless_flag() {
+        let cmd = parse(&args(&["ptt", "--key", "0x14", "--device", "{id}"])).expect("parses");
+        assert_eq!(spec(&cmd).device.as_deref(), Some("{id}"));
+
+        let err = parse(&args(&["ptt", "--key"])).expect_err("missing value");
+        assert!(err.to_string().contains("--key"), "{err}");
+    }
+
+    #[test]
+    fn ptt_rejects_an_unknown_flag() {
+        let err = parse(&args(&["ptt", "--loud", "yes"])).expect_err("unknown flag");
+        assert!(err.to_string().contains("--loud"), "{err}");
+    }
+
     // --- device selection ------------------------------------------------
 
     #[test]
@@ -274,6 +488,15 @@ mod tests {
         // status must never touch the mute state
         assert!(muted.calls().is_empty());
         assert!(unmuted.calls().is_empty());
+    }
+
+    #[test]
+    fn execute_refuses_the_interactive_command() {
+        let cmd = parse(&args(&["ptt", "--key", "0x14"])).expect("parses");
+        let ctl = FakeController::new(devices(), true);
+        let err = execute(&cmd, &ctl).expect_err("interactive command");
+        assert!(err.to_string().contains("hold-to-talk"), "{err}");
+        assert!(ctl.calls().is_empty(), "it must not touch the microphone");
     }
 
     #[test]

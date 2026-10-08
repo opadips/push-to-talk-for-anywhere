@@ -1,6 +1,213 @@
 //! Keyboard/mouse input abstraction (plan §4) plus the low-level hook
 //! implementation (plan §7).
 //!
-//! [`InputSource`], [`Binding`] and [`InputEvent`] arrive in milestone M2,
-//! together with `hook.rs`. The hook only ever compares against the one bound
-//! input — it never records or forwards other keystrokes (plan §11).
+//! The hook only ever compares against the one bound input — it never records
+//! or forwards other keystrokes (plan §11).
+
+#[cfg(windows)]
+pub mod hook;
+
+use crate::error::{Error, Result};
+use std::sync::mpsc::{Receiver, Sender};
+
+/// A mouse button that can be bound (plan §1: including the side buttons).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    X1,
+    X2,
+}
+
+impl MouseButton {
+    /// Parse the `config.toml` / CLI spelling of a button (plan §8).
+    pub fn from_name(name: &str) -> Result<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "middle" => Ok(Self::Middle),
+            "x1" => Ok(Self::X1),
+            "x2" => Ok(Self::X2),
+            _ => Err(Error::InvalidMouseButton(name.to_string())),
+        }
+    }
+
+    /// The name `config.toml` stores (plan §8).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+            Self::X1 => "x1",
+            Self::X2 => "x2",
+        }
+    }
+}
+
+/// The one input the app listens for (plan §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// `vk` is the virtual-key code, `scan` the scan code (both are recorded
+    /// so the binding survives layout details, plan §8).
+    Key {
+        vk: u16,
+        scan: u16,
+    },
+    Mouse(MouseButton),
+}
+
+impl Binding {
+    /// Keyboard hook comparison — **the only comparison the hook performs**
+    /// (plan §11: nothing else is ever recorded or stored).
+    pub fn matches_key(&self, vk: u16) -> bool {
+        matches!(self, Self::Key { vk: bound, .. } if *bound == vk)
+    }
+
+    /// Mouse hook comparison — likewise limited to the bound button.
+    pub fn matches_mouse(&self, button: MouseButton) -> bool {
+        matches!(self, Self::Mouse(bound) if *bound == button)
+    }
+
+    /// Human-readable form for CLI output and the settings UI.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Key { vk, .. } => format!("key {vk:#04x}"),
+            Self::Mouse(button) => format!("mouse {}", button.name()),
+        }
+    }
+
+    /// `kind` field of `[binding]` in `config.toml` (plan §8).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Key { .. } => "key",
+            Self::Mouse(_) => "mouse",
+        }
+    }
+
+    /// `mouse_button` field of `[binding]` in `config.toml` (plan §8).
+    pub fn button_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Key { .. } => None,
+            Self::Mouse(button) => Some(button.name()),
+        }
+    }
+
+    /// `vk` field of `[binding]` in `config.toml` (plan §8).
+    pub fn vk(&self) -> Option<u16> {
+        match self {
+            Self::Key { vk, .. } => Some(*vk),
+            Self::Mouse(_) => None,
+        }
+    }
+}
+
+/// Press / release of the bound input (plan §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    BindingDown,
+    BindingUp,
+}
+
+/// Where bound input comes from (plan §4).
+///
+/// Windows implements this with `WH_KEYBOARD_LL` / `WH_MOUSE_LL` hooks
+/// ([`hook`]); tests use a fake.
+pub trait InputSource {
+    /// Start listening; events go to `tx`. With `swallow`, the bound input is
+    /// consumed so it never reaches other applications (plan §1).
+    fn start(&mut self, binding: Binding, swallow: bool, tx: Sender<InputEvent>) -> Result<()>;
+    fn set_binding(&mut self, binding: Binding, swallow: bool);
+    /// "Press a key to bind" mode: yields the next input and does not forward
+    /// it (plan §4).
+    fn capture_next(&mut self) -> Receiver<Binding>;
+    fn stop(&mut self);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps_lock() -> Binding {
+        Binding::Key {
+            vk: 0x14,
+            scan: 0x3a,
+        }
+    }
+
+    // --- matching ---------------------------------------------------------
+
+    #[test]
+    fn a_key_binding_matches_only_its_own_vk_code() {
+        let binding = caps_lock();
+        assert!(binding.matches_key(0x14));
+        assert!(!binding.matches_key(0x41), "any other key must not match");
+        assert!(
+            !binding.matches_mouse(MouseButton::X1),
+            "mouse bindings ignore keys"
+        );
+    }
+
+    #[test]
+    fn a_mouse_binding_matches_only_its_own_button() {
+        let binding = Binding::Mouse(MouseButton::X1);
+        assert!(binding.matches_mouse(MouseButton::X1));
+        assert!(!binding.matches_mouse(MouseButton::X2));
+        assert!(!binding.matches_mouse(MouseButton::Left));
+        assert!(
+            !binding.matches_key(0x14),
+            "key bindings ignore mouse buttons"
+        );
+    }
+
+    // --- names (config.toml §8, CLI, settings UI) -------------------------
+
+    #[test]
+    fn mouse_buttons_parse_from_their_config_names() {
+        for (name, expected) in [
+            ("left", MouseButton::Left),
+            ("right", MouseButton::Right),
+            ("middle", MouseButton::Middle),
+            ("x1", MouseButton::X1),
+            ("x2", MouseButton::X2),
+        ] {
+            assert_eq!(MouseButton::from_name(name).unwrap(), expected);
+        }
+        assert_eq!(
+            MouseButton::from_name("X1").unwrap(),
+            MouseButton::X1,
+            "case-insensitive"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mouse_button_is_rejected_with_the_valid_names() {
+        let err = MouseButton::from_name("thumb").expect_err("no such button");
+        let message = err.to_string();
+        for valid in ["left", "right", "middle", "x1", "x2"] {
+            assert!(message.contains(valid), "message lists {valid}: {message}");
+        }
+        assert!(
+            message.contains("thumb"),
+            "message repeats what was typed: {message}"
+        );
+    }
+
+    #[test]
+    fn bindings_describe_themselves_for_cli_and_settings_output() {
+        assert_eq!(caps_lock().describe(), "key 0x14");
+        assert_eq!(Binding::Mouse(MouseButton::X2).describe(), "mouse x2");
+    }
+
+    // --- config round trip (§8 stores kind/vk/scan/mouse_button/swallow) --
+
+    #[test]
+    fn binding_reports_the_kind_and_button_name_the_config_expects() {
+        assert_eq!(caps_lock().kind_name(), "key");
+        assert_eq!(Binding::Mouse(MouseButton::X1).kind_name(), "mouse");
+        assert_eq!(Binding::Mouse(MouseButton::X1).button_name(), Some("x1"));
+        assert_eq!(caps_lock().button_name(), None);
+        assert_eq!(caps_lock().vk(), Some(0x14));
+        assert_eq!(Binding::Mouse(MouseButton::X1).vk(), None);
+    }
+}
