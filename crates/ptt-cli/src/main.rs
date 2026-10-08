@@ -4,12 +4,20 @@
 //! and `ptt` — the hold-to-talk session (plan §9, milestone M2).
 
 mod cli;
+mod instance;
+mod logging;
 mod ptt;
 
 use anyhow::Result;
 use ptt_core::audio::MicController;
 
 fn main() -> Result<()> {
+    // Plan §2: rolling file log; the guard must live as long as the process.
+    let _log = logging::init();
+    dispatch().inspect_err(|error| tracing::error!("ptt: {error:#}"))
+}
+
+fn dispatch() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse(&args)?;
 

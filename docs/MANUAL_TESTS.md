@@ -20,6 +20,7 @@ ptt.exe devices                         # list mics (M1)
 ptt.exe status                          # 'muted' / 'unmuted' (M1)
 ptt.exe mute            /  ptt.exe unmute
 
+ptt.exe ptt                             # no flags: everything from config.toml (M3)
 ptt.exe ptt --key 0x14                  # hold-to-talk on Caps Lock (M2)
 ptt.exe ptt --key 0x14 --no-swallow     # let the key reach other windows
 ptt.exe ptt --key 0x14 --release-delay 0
@@ -28,8 +29,13 @@ ptt.exe ptt --key 0x41 --device {id}    # bind a key, pick the mic
 ```
 
 The `ptt` session prints its binding, mutes the mic, and unmutes it while the
-bound input is held. Press **Enter** to quit; it restores the mute state it
-found at start-up.
+bound input is held. Press **Enter** to quit (or **Ctrl+C**); either way it
+restores the mute state it found at start-up.
+
+The session also prints the two files it owns (M3):
+
+- config: `%APPDATA%\ptt-tool\config.toml`
+- log: `%LOCALAPPDATA%\ptt-tool\logs\ptt.log`
 
 Start/stop sound cues do not exist until M5, so the sound parts of the
 checklist cannot be observed yet.
@@ -56,14 +62,24 @@ checklist cannot be observed yet.
 
 ### Fail-safe (M3) — critical
 - [ ] Task Manager kill while talking, then relaunch: mic restored to original state.
-- [ ] Quit from tray: mic restored to original state.
+- [ ] Quit with Enter **and** with Ctrl+C: mic restored to original state.
 - [ ] Panic (forced): mic restored.
-- [ ] Corrupt `config.toml`: falls back to defaults, logs, no crash.
-- [ ] Two instances: second launch focuses/quits in favour of the first.
+- [ ] Corrupt `config.toml`: falls back to defaults, logs, no crash, and the
+      broken file is kept as `config.toml.bad`.
+- [ ] Two instances: the second launch refuses to start with
+      "ptt is already running".
+- [ ] Flags persist: run `ptt.exe ptt --release-delay 500`, quit, then run
+      `ptt.exe ptt` plain — the log line reports a 500 ms release delay.
+- [ ] Log file exists at `%LOCALAPPDATA%\ptt-tool\logs\ptt.log` and records
+      the session start.
+- [ ] `state.json` in `%LOCALAPPDATA%\ptt-tool\` ends every test with
+      `"dirty": false`.
 
 ### Sleep / lock (M2-M3)
 - [ ] Sleep + resume: hotkey still works.
 - [ ] Lock + unlock: hotkey still works.
+- [ ] After both: hold-to-talk still unmutes while held (the hooks were
+      re-installed, plan §7).
 
 ### Tray & settings (M4)
 - [ ] Tray icon shows three distinct states: Disabled / Muted / Talking.

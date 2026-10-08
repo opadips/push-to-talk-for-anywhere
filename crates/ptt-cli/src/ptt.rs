@@ -12,11 +12,13 @@ use anyhow::Result;
 #[cfg(any(windows, test))]
 use ptt_core::audio::MicController;
 #[cfg(any(windows, test))]
-use ptt_core::config::{AudioConfig, Config};
+use ptt_core::config::{Config, LoadSource};
 #[cfg(any(windows, test))]
 use ptt_core::engine::Engine;
 #[cfg(any(windows, test))]
 use ptt_core::input::InputEvent;
+#[cfg(any(windows, test))]
+use std::path::Path;
 #[cfg(any(windows, test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(windows, test))]
@@ -28,6 +30,19 @@ use std::time::{Duration, Instant};
 /// quit-flag check interval.
 #[cfg(any(windows, test))]
 const POLL: Duration = Duration::from_millis(50);
+
+/// Set by Enter, by Ctrl+C and by the shutdown handler; read by the loop
+/// (plan §6.2: every way out of the session must be a *clean* way out).
+#[cfg(windows)]
+static QUIT: AtomicBool = AtomicBool::new(false);
+
+/// Ctrl+C must quit through the normal path — restore, then exit — instead
+/// of letting the console kill the process mid-talk (plan §6.2).
+#[cfg(windows)]
+unsafe extern "system" fn on_console_ctrl(_control_type: u32) -> windows::core::BOOL {
+    QUIT.store(true, Ordering::Relaxed);
+    windows::Win32::Foundation::TRUE
+}
 
 /// Feed the engine from `events` until the channel closes or `quit` is set.
 ///
@@ -77,77 +92,189 @@ pub fn run_loop<C: MicController>(
 }
 
 /// Run the hold-to-talk session until the user quits (Windows, plan §7/§9).
+/// Load `config.toml`, apply the `ptt ptt` flag overrides and persist the
+/// result (plan §8): the file is the source of truth, a flag is a one-off
+/// override, and an unreadable file is set aside instead of being silently
+/// destroyed. Returns the effective config plus everything worth logging.
+#[cfg(any(windows, test))]
+pub fn resolve_config(path: &Path, spec: &crate::cli::PttSpec) -> Result<(Config, Vec<String>)> {
+    let (mut config, report) = Config::load(path);
+    let corrupt = report.source == LoadSource::Corrupt;
+    let mut messages = report.messages;
+
+    if corrupt {
+        let backup = path.with_extension("toml.bad");
+        match std::fs::rename(path, &backup) {
+            Ok(()) => messages.push(format!("unreadable config kept at {}", backup.display())),
+            Err(error) => messages.push(format!("could not keep the unreadable config: {error}")),
+        }
+    }
+
+    if let Some(device) = &spec.device {
+        config.audio.device_id = device.clone();
+    }
+    if let Some(binding) = &spec.binding {
+        let swallow = spec.swallow.unwrap_or(config.binding.swallow);
+        config.set_binding(binding, swallow);
+    } else if let Some(swallow) = spec.swallow {
+        config.binding.swallow = swallow;
+    }
+    if let Some(release_delay_ms) = spec.release_delay_ms {
+        config.audio.release_delay_ms = release_delay_ms;
+    }
+
+    messages.extend(config.validate());
+    config.save(path)?;
+    Ok((config, messages))
+}
+
 #[cfg(windows)]
 pub fn run(spec: &crate::cli::PttSpec) -> Result<()> {
     use crate::cli;
     use ptt_core::audio::wasapi::WasapiController;
     use ptt_core::audio::DEFAULT_DEVICE;
+    use ptt_core::config::{default_path, OnExit};
+    use ptt_core::failsafe::{self, Recovery, StateFile};
     use ptt_core::input::hook::HookInputSource;
     use ptt_core::input::InputSource;
     use std::sync::mpsc::channel;
-    use std::sync::Arc;
+    use tracing::{info, warn};
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
 
-    let requested = spec
-        .device
-        .clone()
-        .unwrap_or_else(|| DEFAULT_DEVICE.to_string());
-    let controller = WasapiController::new(requested);
+    // Plan §9 M3: one session at a time.
+    crate::instance::acquire()?;
+
+    // Plan §8: the file decides, a flag is a one-off override, and the
+    // result is written back so the next run starts from it.
+    let config_path = default_path();
+    let (config, messages) = resolve_config(&config_path, spec)?;
+    for message in messages {
+        info!("{message}");
+    }
+
+    // Plan §6.4: a run that died mid-talk gets its microphone back before
+    // this session touches anything.
+    match failsafe::recover(
+        &failsafe::default_path(),
+        crate::instance::process_running,
+        |device| WasapiController::new(device.to_string()),
+    ) {
+        Ok(Recovery::Restored {
+            device_id,
+            original_muted,
+        }) => info!(
+            "recovered the microphone abandoned by an earlier run ({device_id}: {})",
+            if original_muted { "muted" } else { "unmuted" }
+        ),
+        Ok(Recovery::Busy { pid }) => info!("the recorded session (pid {pid}) is still running"),
+        Ok(Recovery::Nothing) => {}
+        Err(error) => warn!("could not recover the recorded state: {error}"),
+    }
+
+    let controller = WasapiController::new(config.audio.device_id.clone());
+    let requested =
+        (config.audio.device_id != DEFAULT_DEVICE).then_some(config.audio.device_id.as_str());
     // Same fail-fast validation as the other commands (plan §9, M1).
-    cli::resolve_selection(&controller, spec.device.as_deref())?;
+    cli::resolve_selection(&controller, requested)?;
 
-    // Plan §6: remember the user's own mute state and hand it back on exit.
+    // Plan §6.1: remember the user's own mute state *before* touching it.
     let original = controller.get_mute()?;
+    let state_path = failsafe::default_path();
+    failsafe::record(&state_path, &config.audio.device_id, original)?;
 
-    let config = Config {
-        audio: AudioConfig {
-            release_delay_ms: spec.release_delay_ms,
-        },
-        ..Config::default()
-    };
+    // Plan §6.3: if the session panics, hand the microphone back on the way
+    // out. The hook builds its own controller, so it works on whatever
+    // thread the panic happened on.
+    let panic_path = state_path.clone();
+    failsafe::install_panic_hook(move || {
+        let outcome = failsafe::restore_dirty(&panic_path, |device| {
+            WasapiController::new(device.to_string())
+        });
+        match outcome {
+            Ok(true) => eprintln!("ptt: microphone restored after a panic"),
+            Ok(false) => {}
+            Err(error) => eprintln!("ptt: restoring after a panic failed: {error}"),
+        }
+    });
+
+    let binding = config.binding();
+    let swallow = config.binding.swallow;
+    let release_delay_ms = config.audio.release_delay_ms;
+    let on_exit = config.audio.on_exit;
+    let device_id = config.audio.device_id.clone();
     let mut engine = Engine::new(controller, config);
     engine.enable(Instant::now())?;
 
     let (tx, rx) = channel();
     let mut source = HookInputSource::new();
-    if let Err(error) = source.start(spec.binding, spec.swallow, tx) {
+    if let Err(error) = source.start(binding, swallow, tx) {
+        // Nothing has been held yet: undo and clear the record.
         engine.mic().set_mute(original)?;
+        failsafe::mark_clean(&state_path)?;
         return Err(error.into());
     }
 
     println!(
-        "ptt: {} bound to {} — microphone muted, unmuted while held",
-        if spec.swallow {
+        "ptt: {} bound to {} — microphone muted, unmuted while held ({release_delay_ms} ms release delay)",
+        if swallow {
             "input"
         } else {
             "input (not swallowed)"
         },
-        spec.binding.describe()
+        binding.describe()
     );
-    println!("ptt: press Enter to quit");
+    println!("ptt: press Enter to quit (Ctrl+C also quits)");
+    println!("ptt: config {}", config_path.display());
+    println!(
+        "ptt: log    {}",
+        crate::logging::log_dir().join("ptt.log").display()
+    );
+    info!(
+        "hold-to-talk started on {device_id}: {}",
+        binding.describe()
+    );
 
-    let quit = Arc::new(AtomicBool::new(false));
+    // Plan §6.2: Ctrl+C joins the same clean-exit path as Enter.
+    QUIT.store(false, Ordering::Relaxed);
+    unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), true) }
+        .map_err(|error| anyhow::anyhow!("cannot install the Ctrl+C handler: {error}"))?;
     {
-        let quit = Arc::clone(&quit);
-        std::thread::spawn(move || {
+        std::thread::spawn(|| {
             let mut line = String::new();
             let _ = std::io::stdin().read_line(&mut line);
-            quit.store(true, Ordering::Relaxed);
+            QUIT.store(true, Ordering::Relaxed);
         });
     }
 
-    let result = run_loop(&mut engine, rx, quit.as_ref());
+    let result = run_loop(&mut engine, rx, &QUIT);
 
     source.stop();
     let shutdown = engine.shutdown(Instant::now()).map(|_| ());
-    let restored = engine.mic().set_mute(original);
+    // Plan §6.2 + §6.6: hand the microphone back the way `[audio] on_exit`
+    // asks for, and clear the record either way.
+    let restored = match on_exit {
+        OnExit::Restore => failsafe::restore(
+            engine.mic(),
+            &StateFile {
+                device_id,
+                original_muted: original,
+                dirty: true,
+                pid: std::process::id(),
+            },
+            &state_path,
+        ),
+        OnExit::Unmute => engine
+            .mic()
+            .set_mute(false)
+            .and_then(|()| failsafe::mark_clean(&state_path)),
+    };
 
     result?;
     shutdown?;
     restored?;
-    println!(
-        "ptt: microphone restored to {}",
-        if original { "muted" } else { "unmuted" }
-    );
+    let handed_back = if original { "muted" } else { "unmuted" };
+    info!("session ended, microphone handed back {handed_back}");
+    println!("ptt: microphone restored to {handed_back}");
     Ok(())
 }
 
@@ -163,8 +290,12 @@ pub fn run(_spec: &crate::cli::PttSpec) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::PttSpec;
     use ptt_core::audio::DeviceInfo;
+    use ptt_core::config::{AudioConfig, LoadSource};
     use ptt_core::error::Result as CoreResult;
+    use ptt_core::input::{Binding, MouseButton};
+    use std::path::PathBuf;
     use std::sync::mpsc::channel;
     use std::sync::{Arc, Mutex};
 
@@ -198,7 +329,10 @@ mod tests {
 
     fn config(release_delay_ms: u64) -> Config {
         Config {
-            audio: AudioConfig { release_delay_ms },
+            audio: AudioConfig {
+                release_delay_ms,
+                ..AudioConfig::default()
+            },
             ..Config::default()
         }
     }
@@ -273,5 +407,95 @@ mod tests {
             "muted far too late: {waited:?}"
         );
         assert_eq!(mic.calls(), vec![true, false, true]);
+    }
+
+    // --- config resolution (plan §8) -------------------------------------
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ptt-run-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    /// A `config.toml` with values nothing on the command line asked for.
+    fn write_file_config(path: &Path) {
+        let mut file = Config::default();
+        file.audio.release_delay_ms = 500;
+        file.audio.device_id = "file-device".into();
+        file.binding.kind = "mouse".into();
+        file.binding.mouse_button = "x1".into();
+        file.binding.swallow = false;
+        file.save(path).unwrap();
+    }
+
+    #[test]
+    fn cli_overrides_win_over_the_file() -> Result<()> {
+        let path = scratch("overrides.toml");
+        write_file_config(&path);
+
+        let spec = PttSpec {
+            device: Some("flag-device".into()),
+            binding: Some(Binding::Key { vk: 0x41, scan: 0 }),
+            release_delay_ms: Some(0),
+            swallow: Some(true),
+        };
+        let (cfg, _messages) = resolve_config(&path, &spec)?;
+
+        assert_eq!(cfg.audio.release_delay_ms, 0);
+        assert_eq!(cfg.audio.device_id, "flag-device");
+        assert_eq!(cfg.binding(), Binding::Key { vk: 0x41, scan: 0 });
+        assert!(cfg.binding.swallow);
+        Ok(())
+    }
+
+    #[test]
+    fn the_config_file_decides_when_no_flag_is_given() -> Result<()> {
+        let path = scratch("file-decides.toml");
+        write_file_config(&path);
+
+        let (cfg, _messages) = resolve_config(&path, &PttSpec::default())?;
+
+        assert_eq!(cfg.audio.release_delay_ms, 500, "the file's delay is used");
+        assert_eq!(cfg.audio.device_id, "file-device");
+        assert_eq!(cfg.binding(), Binding::Mouse(MouseButton::X1));
+        assert!(!cfg.binding.swallow, "the file's swallow flag is used");
+        Ok(())
+    }
+
+    #[test]
+    fn a_first_run_creates_the_config_file() -> Result<()> {
+        let path = scratch("first-run.toml");
+        let _ = std::fs::remove_file(&path);
+
+        let (cfg, _messages) = resolve_config(&path, &PttSpec::default())?;
+
+        assert!(path.exists(), "config.toml is written for the user to edit");
+        assert_eq!(cfg, Config::default());
+        let (reloaded, report) = Config::load(&path);
+        assert_eq!(report.source, LoadSource::File, "what was written reloads");
+        assert_eq!(reloaded, Config::default());
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreadable_config_is_kept_as_evidence_and_replaced_by_defaults() -> Result<()> {
+        let path = scratch("corrupt-resolve.toml");
+        std::fs::write(&path, "not [valid toml").unwrap();
+
+        let (cfg, messages) = resolve_config(&path, &PttSpec::default())?;
+
+        assert_eq!(cfg, Config::default(), "defaults take over");
+        assert!(
+            path.with_extension("toml.bad").exists(),
+            "the broken file is kept for the user to look at"
+        );
+        let (reloaded, report) = Config::load(&path);
+        assert_eq!(report.source, LoadSource::File, "the file is valid again");
+        assert_eq!(reloaded, Config::default());
+        assert!(
+            messages.iter().any(|m| m.contains(".bad")),
+            "the backup location is logged: {messages:?}"
+        );
+        Ok(())
     }
 }

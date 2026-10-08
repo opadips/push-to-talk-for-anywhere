@@ -7,7 +7,9 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
 
 # Windows-only: the `windows` crate does not build for other targets.
 [target.'cfg(windows)'.dependencies]
@@ -24,4 +26,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    # WNDCLASSW carries an HBRUSH (notify window for re-installation, §7)
+    "Win32_Graphics_Gdi",
+    # session lock/unlock notifications (hook re-install, plan §7)
+    "Win32_System_RemoteDesktop",
 ] }

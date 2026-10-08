@@ -12,3 +12,15 @@ path = "src/main.rs"
 [dependencies]
 ptt-core = { path = "../ptt-core" }
 anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Single instance, Ctrl+C handling, process liveness (plan §9 M3).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }

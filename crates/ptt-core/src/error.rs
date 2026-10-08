@@ -22,6 +22,12 @@ pub enum Error {
     #[error("input hook failed: {0}")]
     InputHook(String),
 
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("file could not be written: {0}")]
+    Write(String),
+
     /// Windows-only: carries the `HRESULT`/message from windows-rs.
     #[cfg(windows)]
     #[error("Windows audio API error: {0}")]
@@ -56,6 +62,14 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("input hook"), "{message}");
         assert!(message.contains("the hook thread exited"), "{message}");
+    }
+
+    #[test]
+    fn write_message_says_what_failed() {
+        let err = Error::Write("unsupported value".into());
+        let message = err.to_string();
+        assert!(message.contains("file"), "{message}");
+        assert!(message.contains("unsupported value"), "{message}");
     }
 
     #[test]

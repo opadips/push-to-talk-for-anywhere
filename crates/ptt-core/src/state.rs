@@ -122,6 +122,7 @@ mod tests {
         Config {
             audio: AudioConfig {
                 release_delay_ms: 200,
+                ..AudioConfig::default()
             },
             ..Config::default()
         }
@@ -164,6 +165,7 @@ mod tests {
             &Config {
                 audio: AudioConfig {
                     release_delay_ms: 0,
+                    ..AudioConfig::default()
                 },
                 ..Config::default()
             },

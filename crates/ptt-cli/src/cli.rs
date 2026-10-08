@@ -47,20 +47,21 @@ pub enum Command {
 }
 
 /// Arguments of the `ptt ptt` hold-to-talk command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Everything here is an *override*: `None` means "take it from
+/// `config.toml`", so the file stays the single source of truth (plan §8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PttSpec {
     pub device: Option<String>,
-    pub binding: Binding,
-    pub release_delay_ms: u64,
-    /// Consume the bound input so it never reaches other windows (plan §1).
-    pub swallow: bool,
+    pub binding: Option<Binding>,
+    pub release_delay_ms: Option<u64>,
+    /// `Some(false)` when `--no-swallow` was given: let the bound input
+    /// reach other windows too (plan §1).
+    pub swallow: Option<bool>,
 }
 
 /// Plan §8 range for `release_delay_ms`.
 const MAX_RELEASE_DELAY_MS: u64 = 2000;
-
-/// Plan §8 default.
-const DEFAULT_RELEASE_DELAY_MS: u64 = 200;
 
 /// Parse command-line arguments (everything after argv[0]).
 pub fn parse(args: &[String]) -> Result<Command> {
@@ -88,14 +89,14 @@ fn parse_ptt(rest: &[String]) -> Result<Command> {
     let mut device = None;
     let mut key: Option<u16> = None;
     let mut mouse: Option<String> = None;
-    let mut release_delay_ms = DEFAULT_RELEASE_DELAY_MS;
-    let mut swallow = true;
+    let mut release_delay_ms: Option<u64> = None;
+    let mut swallow: Option<bool> = None;
 
     let mut index = 0;
     while index < rest.len() {
         let flag = rest[index].as_str();
         if flag == "--no-swallow" {
-            swallow = false;
+            swallow = Some(false);
             index += 1;
             continue;
         }
@@ -109,7 +110,7 @@ fn parse_ptt(rest: &[String]) -> Result<Command> {
             "--device" => device = Some(value.clone()),
             "--key" => key = Some(parse_vk(value)?),
             "--mouse" => mouse = Some(value.clone()),
-            "--release-delay" => release_delay_ms = parse_release_delay(value)?,
+            "--release-delay" => release_delay_ms = Some(parse_release_delay(value)?),
             other => bail!("unexpected argument for 'ptt': {other}\n\n{USAGE}"),
         }
         index += 2;
@@ -117,9 +118,10 @@ fn parse_ptt(rest: &[String]) -> Result<Command> {
 
     let binding = match (key, mouse) {
         (Some(_), Some(_)) => bail!("'ptt' takes either --key or --mouse, not both"),
-        (Some(vk), None) => Binding::Key { vk, scan: 0 },
-        (None, Some(name)) => Binding::Mouse(MouseButton::from_name(&name)?),
-        (None, None) => bail!("'ptt' needs a binding: --key <vk> or --mouse <button>"),
+        (Some(vk), None) => Some(Binding::Key { vk, scan: 0 }),
+        (None, Some(name)) => Some(Binding::Mouse(MouseButton::from_name(&name)?)),
+        // No flag: `config.toml` decides (plan §8).
+        (None, None) => None,
     };
 
     Ok(Command::Ptt(PttSpec {
@@ -340,23 +342,25 @@ mod tests {
     }
 
     #[test]
-    fn ptt_requires_a_binding() {
-        let err = parse(&args(&["ptt"])).expect_err("no binding given");
-        let message = err.to_string();
-        assert!(message.contains("--key"), "{message}");
-        assert!(message.contains("--mouse"), "{message}");
+    fn ptt_without_flags_leaves_everything_to_the_config() {
+        let cmd = parse(&args(&["ptt"])).expect("no flags means config defaults");
+        let spec = spec(&cmd);
+        assert_eq!(spec.binding, None, "binding comes from config.toml");
+        assert_eq!(spec.device, None);
+        assert_eq!(spec.release_delay_ms, None);
+        assert_eq!(spec.swallow, None);
     }
 
     #[test]
-    fn ptt_parses_a_hex_key_with_the_plan_defaults() {
+    fn ptt_parses_a_hex_key() {
         let cmd = parse(&args(&["ptt", "--key", "0x14"])).expect("hex vk");
         assert_eq!(
             cmd,
             Command::Ptt(PttSpec {
                 device: None,
-                binding: Binding::Key { vk: 0x14, scan: 0 },
-                release_delay_ms: 200,
-                swallow: true,
+                binding: Some(Binding::Key { vk: 0x14, scan: 0 }),
+                release_delay_ms: None,
+                swallow: None,
             })
         );
     }
@@ -364,7 +368,7 @@ mod tests {
     #[test]
     fn ptt_parses_a_decimal_key() {
         let cmd = parse(&args(&["ptt", "--key", "41"])).expect("decimal vk");
-        assert_eq!(spec(&cmd).binding, Binding::Key { vk: 41, scan: 0 });
+        assert_eq!(spec(&cmd).binding, Some(Binding::Key { vk: 41, scan: 0 }));
     }
 
     #[test]
@@ -382,7 +386,7 @@ mod tests {
     #[test]
     fn ptt_parses_a_mouse_button() {
         let cmd = parse(&args(&["ptt", "--mouse", "x1"])).expect("mouse binding");
-        assert_eq!(spec(&cmd).binding, Binding::Mouse(MouseButton::X1));
+        assert_eq!(spec(&cmd).binding, Some(Binding::Mouse(MouseButton::X1)));
     }
 
     #[test]
@@ -402,7 +406,7 @@ mod tests {
     fn ptt_release_delay_is_configurable_within_the_plan_range() {
         let cmd = parse(&args(&["ptt", "--key", "0x14", "--release-delay", "0"]))
             .expect("zero delay is allowed");
-        assert_eq!(spec(&cmd).release_delay_ms, 0);
+        assert_eq!(spec(&cmd).release_delay_ms, Some(0));
 
         let err = parse(&args(&["ptt", "--key", "0x14", "--release-delay", "2001"]))
             .expect_err("over the maximum");
@@ -412,9 +416,9 @@ mod tests {
     #[test]
     fn ptt_swallows_the_bound_input_unless_told_not_to() {
         let on = parse(&args(&["ptt", "--key", "0x14"])).expect("parses");
-        assert!(spec(&on).swallow, "swallow is the §8 default");
+        assert_eq!(spec(&on).swallow, None, "config decides unless told");
         let off = parse(&args(&["ptt", "--key", "0x14", "--no-swallow"])).expect("parses");
-        assert!(!spec(&off).swallow);
+        assert_eq!(spec(&off).swallow, Some(false));
     }
 
     #[test]
