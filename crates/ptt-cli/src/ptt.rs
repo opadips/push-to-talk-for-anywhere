@@ -101,8 +101,14 @@ pub fn run(spec: &crate::cli::PttSpec) -> Result<()> {
 
     // Plan §8 (M3 ruling): `enabled` is the tray's toggle; running `ptt ptt`
     // *is* the enable, so this session comes up armed either way.
-    let session =
-        SessionHandle::start(config, controller, HookInputSource::new(), state_path, true)?;
+    let session = SessionHandle::start_with_sound(
+        config,
+        controller,
+        HookInputSource::new(),
+        state_path,
+        true,
+        Some(Box::new(ptt_core::sound::winmm::WinmmPlayer::new())),
+    )?;
 
     println!(
         "ptt: {} bound to {} — microphone muted, unmuted while held ({release_delay_ms} ms release delay)",

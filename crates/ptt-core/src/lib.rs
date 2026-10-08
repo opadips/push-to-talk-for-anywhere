@@ -12,4 +12,5 @@ pub mod error;
 pub mod failsafe;
 pub mod input;
 pub mod session;
+pub mod sound;
 pub mod state;

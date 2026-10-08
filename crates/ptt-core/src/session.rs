@@ -7,11 +7,12 @@
 //! session ends (plan §6.2).
 
 use crate::audio::MicController;
-use crate::config::{Config, OnExit};
+use crate::config::{Config, OnExit, SoundsConfig};
 use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::failsafe::{self, StateFile};
 use crate::input::{Binding, InputEvent, InputSource};
+use crate::sound::SoundPlayer;
 use crate::state::State;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -52,6 +53,8 @@ pub enum Command {
     SetEnabled(bool),
     /// The settings window saved a new binding (plan §4).
     Rebind { binding: Binding, swallow: bool },
+    /// The settings window saved new `[sounds]` values (cue on/off, volume).
+    SetSounds(SoundsConfig),
     /// "Press any key": the next press answers on this channel.
     Capture(Sender<Binding>),
     /// The window found the key itself (or went away): disarm the capture.
@@ -77,9 +80,26 @@ impl SessionHandle {
     pub fn start<C, S>(
         config: Config,
         controller: C,
+        source: S,
+        state_path: PathBuf,
+        enabled: bool,
+    ) -> Result<SessionHandle>
+    where
+        C: MicController + 'static,
+        S: InputSource + Send + 'static,
+    {
+        Self::start_with_sound(config, controller, source, state_path, enabled, None)
+    }
+
+    /// [`SessionHandle::start`] with the player the talk / release cues go
+    /// to (plan §9 M5). `None` runs the session silently.
+    pub fn start_with_sound<C, S>(
+        config: Config,
+        controller: C,
         mut source: S,
         state_path: PathBuf,
         enabled: bool,
+        sound: Option<Box<dyn SoundPlayer>>,
     ) -> Result<SessionHandle>
     where
         C: MicController + 'static,
@@ -95,6 +115,9 @@ impl SessionHandle {
         let device_id = config.audio.device_id.clone();
 
         let mut engine = Engine::new(controller, config);
+        if let Some(player) = sound {
+            engine = engine.with_sound(player);
+        }
         engine.enable(Instant::now())?;
         if !enabled {
             // Muted either way — `Disabled` *is* "muted, not listening"
@@ -148,6 +171,12 @@ impl SessionHandle {
     /// without a restart (plan §4).
     pub fn rebind(&self, binding: Binding, swallow: bool) {
         let _ = self.commands.send(Command::Rebind { binding, swallow });
+    }
+
+    /// The settings window saved new sound settings: they reach the running
+    /// session without a restart (plan §9 M5).
+    pub fn set_sounds(&self, sounds: SoundsConfig) {
+        let _ = self.commands.send(Command::SetSounds(sounds));
     }
 
     /// "Press any key" (plan §9 M4): answers with the next press, skipping
@@ -301,6 +330,7 @@ fn pump<C: MicController, S: InputSource>(
                     }?;
                 }
                 Ok(Command::Rebind { binding, swallow }) => source.set_binding(binding, swallow),
+                Ok(Command::SetSounds(sounds)) => engine.set_sounds(sounds),
                 Ok(Command::Capture(reply)) => {
                     info!("capture armed: the next key press becomes the binding");
                     capture = Some((source.capture_next(), reply));
@@ -863,5 +893,59 @@ mod tests {
             crate::failsafe::Snapshot::Found(state) => assert!(state.dirty),
             other => panic!("the record was lost: {other:?}"),
         }
+    }
+
+    /// Cues the fake player was asked to play.
+    #[derive(Clone, Default)]
+    struct SharedPlayer {
+        played: Arc<Mutex<Vec<(crate::sound::Cue, f32)>>>,
+    }
+
+    impl SharedPlayer {
+        fn played(&self) -> Vec<(crate::sound::Cue, f32)> {
+            self.played.lock().unwrap().clone()
+        }
+    }
+
+    impl SoundPlayer for SharedPlayer {
+        fn play(&self, cue: crate::sound::Cue, volume: f32) {
+            self.played.lock().unwrap().push((cue, volume));
+        }
+    }
+
+    #[test]
+    fn the_session_plays_cues_and_takes_new_sound_settings_without_a_restart() {
+        use crate::sound::Cue;
+        let mic = SharedMic::default();
+        let source = FakeSource::default();
+        let player = SharedPlayer::default();
+        let mut cfg = config(0);
+        cfg.sounds.volume = 0.3;
+        let session = SessionHandle::start_with_sound(
+            cfg,
+            mic.clone(),
+            source.clone(),
+            scratch("sounds"),
+            true,
+            Some(Box::new(player.clone())),
+        )
+        .unwrap();
+
+        source.press(InputEvent::BindingDown);
+        source.press(InputEvent::BindingUp);
+        assert!(wait_until(|| player.played().len() == 2));
+        assert_eq!(player.played(), vec![(Cue::Start, 0.3), (Cue::Stop, 0.3)]);
+
+        session.set_sounds(SoundsConfig {
+            enabled: true,
+            volume: 0.8,
+        });
+        // Orders are read on the worker's next wake-up, before the next press
+        // is looked at — so the press below already sees the new volume.
+        std::thread::sleep(Duration::from_millis(150));
+        source.press(InputEvent::BindingDown);
+        assert!(wait_until(|| player.played().len() == 3));
+        assert_eq!(player.played()[2], (Cue::Start, 0.8));
+        session.stop().unwrap();
     }
 }

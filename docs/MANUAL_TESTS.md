@@ -133,7 +133,16 @@ Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
       unmuted for exactly the set delay.
 - [ ] Swallow off → the bound key still reaches other applications while
       held; swallow on → it does not.
-- [ ] Sounds toggle + volume are persisted (audio itself is checked in M5).
+- [ ] Sounds toggle + volume are persisted.
+- [ ] Sound cues: pressing the bound key plays `talk_start.wav` (your
+      "pushing" recording) as the mic opens; releasing it plays
+      `talk_stop.wav` ("leaving") when the mic closes — i.e. after the
+      release delay. A quick tap plays start, then stop. No second start cue
+      when you press again within the release delay.
+- [ ] Sound volume: move the slider, Save (no restart needed) — the next cue
+      is louder/quieter; 0% is silent. Untick "Play the talk / release
+      sounds" + Save — no cue plays. The sounds come out of the default
+      playback device and do not affect the app's mic muting.
 - [ ] Start with Windows adds/removes `ptt-tool` under
       `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - [ ] `start_hidden = true` → relaunch shows **no window**, only the tray icon.

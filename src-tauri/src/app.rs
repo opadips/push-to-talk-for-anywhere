@@ -186,13 +186,15 @@ fn start_session(state: &AppState) -> Result<(), String> {
 fn spawn_session(config: &Config) -> Result<SessionHandle, String> {
     use ptt_core::audio::wasapi::WasapiController;
     use ptt_core::input::hook::HookInputSource;
+    use ptt_core::sound::winmm::WinmmPlayer;
 
-    SessionHandle::start(
+    SessionHandle::start_with_sound(
         config.clone(),
         WasapiController::new(config.audio.device_id.clone()),
         HookInputSource::new(),
         ptt_core::failsafe::default_path(),
         config.enabled,
+        Some(Box::new(WinmmPlayer::new())),
     )
     .map_err(|error| error.to_string())
 }
@@ -276,6 +278,15 @@ pub fn apply_settings(state: &AppState, mut settings: Config) -> Result<Config, 
             }
         } else if current.enabled != settings.enabled {
             set_enabled(state, settings.enabled)?;
+        }
+    }
+
+    // New cue settings reach the running session without a restart. (A
+    // session that was just restarted above already has them; sending them
+    // again is harmless.)
+    if current.sounds != settings.sounds {
+        if let Some(session) = state.session.lock().unwrap().as_ref() {
+            session.set_sounds(settings.sounds.clone());
         }
     }
 

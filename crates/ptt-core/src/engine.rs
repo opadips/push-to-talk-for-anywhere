@@ -5,13 +5,14 @@
 //! (hook thread, timer thread, audio worker) lives in the caller — the engine
 //! itself is synchronous and clock-injected, so it is fully testable.
 //!
-//! Sound actions are dropped here until a player exists (M5); the state
-//! machine still emits them.
+//! Sound actions go to the [`SoundPlayer`] when one is attached (M5);
+//! without one — the tests, a machine with no sound — they are dropped.
 
 use crate::audio::MicController;
-use crate::config::Config;
+use crate::config::{Config, SoundsConfig};
 use crate::error::Result;
 use crate::input::InputEvent;
+use crate::sound::{Cue, SoundPlayer};
 use crate::state::{step, Action, Event, State};
 use std::time::Instant;
 
@@ -20,6 +21,7 @@ pub struct Engine<C> {
     controller: C,
     config: Config,
     state: State,
+    sound: Option<Box<dyn SoundPlayer>>,
 }
 
 impl<C: MicController> Engine<C> {
@@ -29,7 +31,21 @@ impl<C: MicController> Engine<C> {
             controller,
             config,
             state: State::Disabled,
+            sound: None,
         }
+    }
+
+    /// Attach the player the talk / release cues go to.
+    pub fn with_sound(mut self, player: Box<dyn SoundPlayer>) -> Self {
+        self.sound = Some(player);
+        self
+    }
+
+    /// The settings window saved new `[sounds]` values: they apply from the
+    /// next cue on, without restarting the session. (Whether a cue is due at
+    /// all is decided by the state machine from `enabled`.)
+    pub fn set_sounds(&mut self, sounds: SoundsConfig) {
+        self.config.sounds = sounds;
     }
 
     pub fn state(&self) -> &State {
@@ -91,12 +107,19 @@ impl<C: MicController> Engine<C> {
                 Action::Mute => self.controller.set_mute(true)?,
                 Action::Unmute => self.controller.set_mute(false)?,
                 Action::ScheduleTick(at) => armed = Some(at),
-                // No sound player exists yet (plan §9 M5); the state machine
-                // still emits these and the runner may log them.
-                Action::PlayStartSound | Action::PlayStopSound | Action::None => {}
+                Action::PlayStartSound => self.play(Cue::Start),
+                Action::PlayStopSound => self.play(Cue::Stop),
+                Action::None => {}
             }
         }
         Ok(armed)
+    }
+
+    /// Hand a cue to the player — it returns at once (see [`SoundPlayer`]).
+    fn play(&self, cue: Cue) {
+        if let Some(player) = &self.sound {
+            player.play(cue, self.config.sounds.volume);
+        }
     }
 }
 
@@ -107,7 +130,7 @@ mod tests {
     use crate::config::{AudioConfig, Config};
     use crate::error::Result;
     use crate::input::InputEvent;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     /// Records every mute call — the plan's fake `MicController` (§10).
@@ -246,5 +269,124 @@ mod tests {
         eng.input(InputEvent::BindingDown, t0).unwrap();
         eng.tick(t0 + Duration::from_secs(1)).unwrap();
         assert_eq!(eng.mic().calls().len(), after);
+    }
+
+    // --- sound cues (plan §9 M5) -----------------------------------------
+
+    /// Records every cue with the volume it was asked for.
+    #[derive(Clone, Default)]
+    struct FakePlayer {
+        played: Arc<Mutex<Vec<(Cue, f32)>>>,
+    }
+
+    impl FakePlayer {
+        fn played(&self) -> Vec<(Cue, f32)> {
+            self.played.lock().unwrap().clone()
+        }
+    }
+
+    impl SoundPlayer for FakePlayer {
+        fn play(&self, cue: Cue, volume: f32) {
+            self.played.lock().unwrap().push((cue, volume));
+        }
+    }
+
+    fn engine_with_sound(delay_ms: u64) -> (Engine<FakeMic>, FakePlayer) {
+        let player = FakePlayer::default();
+        let mut config = config(delay_ms);
+        config.sounds.volume = 0.25;
+        let eng = Engine::new(FakeMic::new(), config).with_sound(Box::new(player.clone()));
+        (eng, player)
+    }
+
+    #[test]
+    fn pressing_plays_the_start_cue_and_the_delayed_release_the_stop_cue() {
+        let (mut eng, player) = engine_with_sound(200);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+        assert_eq!(player.played(), vec![], "enabling is silent");
+
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        assert_eq!(
+            player.played(),
+            vec![(Cue::Start, 0.25)],
+            "volume passed on"
+        );
+
+        eng.input(InputEvent::BindingUp, t0).unwrap();
+        assert_eq!(
+            player.played().len(),
+            1,
+            "no stop cue while the mic is open"
+        );
+
+        eng.tick(t0 + Duration::from_millis(200)).unwrap();
+        assert_eq!(
+            player.played(),
+            vec![(Cue::Start, 0.25), (Cue::Stop, 0.25)],
+            "the stop cue comes with the mute"
+        );
+    }
+
+    #[test]
+    fn zero_release_delay_plays_the_stop_cue_on_release() {
+        let (mut eng, player) = engine_with_sound(0);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        eng.input(InputEvent::BindingUp, t0).unwrap();
+        assert_eq!(
+            player
+                .played()
+                .iter()
+                .map(|(cue, _)| *cue)
+                .collect::<Vec<_>>(),
+            vec![Cue::Start, Cue::Stop]
+        );
+    }
+
+    #[test]
+    fn pressing_again_during_the_release_delay_does_not_replay_the_start_cue() {
+        let (mut eng, player) = engine_with_sound(200);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        eng.input(InputEvent::BindingUp, t0).unwrap();
+        eng.input(InputEvent::BindingDown, t0 + Duration::from_millis(50))
+            .unwrap();
+        eng.tick(t0 + Duration::from_millis(200)).unwrap(); // stale tick
+        assert_eq!(player.played(), vec![(Cue::Start, 0.25)]);
+    }
+
+    #[test]
+    fn disabled_sounds_stay_silent_and_a_new_volume_applies_live() {
+        let (mut eng, player) = engine_with_sound(0);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+
+        eng.set_sounds(SoundsConfig {
+            enabled: false,
+            volume: 0.25,
+        });
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        eng.input(InputEvent::BindingUp, t0).unwrap();
+        assert_eq!(player.played(), vec![], "the checkbox is off");
+
+        eng.set_sounds(SoundsConfig {
+            enabled: true,
+            volume: 0.9,
+        });
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        assert_eq!(player.played(), vec![(Cue::Start, 0.9)]);
+    }
+
+    #[test]
+    fn an_engine_without_a_player_just_skips_the_cues() {
+        let mut eng = engine(0);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        eng.input(InputEvent::BindingUp, t0).unwrap();
+        assert_eq!(eng.mic().calls(), vec![true, false, true]);
     }
 }
