@@ -1,8 +1,8 @@
 // Generates assets/app-icon.png (512x512 RGBA) — a simple microphone mark.
 // Run: node scripts/make-app-icon.mjs [output-path]
-import { deflateSync, crc32 } from "node:zlib";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { encodePng } from "./lib/png.mjs";
 
 const SIZE = 512;
 const out = resolve(process.argv[2] ?? "assets/app-icon.png");
@@ -66,37 +66,7 @@ fill(ring, FG);
 fill(circle(392, 128, 34), GREEN);
 
 // --- PNG encoding --------------------------------------------------------
-const raw = Buffer.alloc(SIZE * (SIZE * 4 + 1));
-for (let y = 0; y < SIZE; y++) {
-  const rowStart = y * (SIZE * 4 + 1);
-  raw[rowStart] = 0; // filter: none
-  Buffer.from(px.buffer, y * SIZE * 4, SIZE * 4).copy(raw, rowStart + 1);
-}
-
-function chunk(type, data) {
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(data.length);
-  const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body) >>> 0);
-  return Buffer.concat([len, body, crc]);
-}
-
-const ihdr = Buffer.alloc(13);
-ihdr.writeUInt32BE(SIZE, 0);
-ihdr.writeUInt32BE(SIZE, 4);
-ihdr[8] = 8; // bit depth
-ihdr[9] = 6; // RGBA
-ihdr[10] = 0;
-ihdr[11] = 0;
-ihdr[12] = 0;
-
-const png = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  chunk("IHDR", ihdr),
-  chunk("IDAT", deflateSync(raw, { level: 9 })),
-  chunk("IEND", Buffer.alloc(0)),
-]);
+const png = encodePng(SIZE, SIZE, px);
 
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, png);
