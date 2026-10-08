@@ -8,7 +8,7 @@
 
 use super::{Binding, InputEvent, InputSource, MouseButton};
 use crate::error::{Error, Result};
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -68,6 +68,20 @@ static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 /// touches these — the notify window procedure runs on that same thread.
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+/// One-time markers so a machine's log shows *whether each callback is ever
+/// invoked at all* (bug 3: mouse captures arrived, key presses never did).
+/// `swap` per event is nanoseconds; only the first event pays for the log.
+static KEYBOARD_FIRST_CALL: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_FIRST_INJECTED: AtomicBool = AtomicBool::new(false);
+static MOUSE_FIRST_CALL: AtomicBool = AtomicBool::new(false);
+
+/// Log `message` exactly once — safe inside the hook callbacks.
+fn log_once(flag: &AtomicBool, message: &str) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        tracing::info!("{message}");
+    }
+}
 
 /// Class name for the notify window, kept alive for the life of the
 /// process so the pointer handed to `RegisterClassW` never dangles.
@@ -172,6 +186,7 @@ fn hook_thread(ready: Sender<Result<()>>) {
         }
     };
     store_hooks(keyboard, mouse);
+    tracing::info!("input hooks installed (keyboard + mouse)");
     let _ = ready.send(Ok(()));
 
     // A hidden window on this thread is what receives resume/unlock
@@ -253,11 +268,14 @@ fn drop_hooks() {
 /// events in between are absorbed by the press latch (auto-repeat and a
 /// repeated release are already ignored by the state machine, plan §5).
 fn rehook() {
+    tracing::info!("re-installing the input hooks (resume or unlock)");
     let Ok((keyboard, mouse)) = (unsafe { install_hooks() }) else {
+        tracing::warn!("re-install failed; keeping the current hooks");
         return;
     };
     drop_hooks();
     store_hooks(keyboard, mouse);
+    tracing::info!("input hooks re-installed");
 
     // A key held across the transition must not leave a stuck latch; a
     // duplicate press this may cause is ignored while already talking.
@@ -337,6 +355,10 @@ fn emit(shared: &mut Shared, event: InputEvent) {
 
 /// `WH_KEYBOARD_LL` callback (plan §7): compare, send, return.
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    log_once(
+        &KEYBOARD_FIRST_CALL,
+        "keyboard hook callback alive (first keyboard event)",
+    );
     if code < 0 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
@@ -344,6 +366,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     // Never act on synthetic input (plan §7) — otherwise our own swallow
     // logic or an automation tool could bounce the mic.
     if info.flags.contains(LLKHF_INJECTED) {
+        log_once(
+            &KEYBOARD_FIRST_INJECTED,
+            "keyboard hook sees synthetic (injected) input — first of possibly many",
+        );
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
@@ -399,6 +425,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
 /// `WH_MOUSE_LL` callback (plan §7), including the side buttons (plan §1).
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    log_once(
+        &MOUSE_FIRST_CALL,
+        "mouse hook callback alive (first mouse event)",
+    );
     if code < 0 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
