@@ -18,3 +18,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+# How we build the app: plain `cargo build` (CI and docs/MANUAL_TESTS.md),
+# never `tauri build`. Without this feature Tauri compiles with `cfg(dev)`,
+# embeds no assets and points the window at `devUrl`
+# (http://localhost:1420) — on a machine without the dev server WebView2
+# shows "localhost refused to connect". `tauri build` would pass the
+# feature itself and `tauri dev` strips it from `default` automatically.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

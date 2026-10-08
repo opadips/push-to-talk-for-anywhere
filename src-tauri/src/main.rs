@@ -13,6 +13,17 @@ mod tray;
 
 use tauri::Manager;
 
+// Plan §9 M4: the settings window must show the *embedded* UI. Tauri's
+// `cfg(dev)` (the `custom-protocol` feature being off, Cargo.toml) makes the
+// codegen embed no assets and point the window at `devUrl`
+// (http://localhost:1420) — on a machine without the dev server WebView2
+// shows "localhost refused to connect". Every build must therefore carry the
+// feature; if one ever loses it, this fails at compile time.
+const _: () = assert!(
+    !cfg!(dev),
+    "cfg(dev) is active: the window would load devUrl instead of the embedded settings UI"
+);
+
 fn main() {
     // Plan §2: rolling file log; the guard must outlive the process.
     if let Some(guard) = ptt_cli::logging::init() {
