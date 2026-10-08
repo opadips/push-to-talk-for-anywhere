@@ -12,10 +12,13 @@ you did not actually observe.
 
 ## Running the checks
 
-Until the tray UI lands (M4) everything is driven from `ptt.exe` in a
-terminal. Use a release build (`cargo build --release`, or the CI artifact).
+Two ways to drive it: `ptt.exe` in a terminal for the low-level checks, and
+the `ptt-tool` tray app (M4) for the product itself. Use a release build
+(`cargo build --release`, or the CI artifact).
 
 ```text
+target\release\ptt-tool.exe            # the tray app (M4)
+
 ptt.exe devices                         # list mics (M1)
 ptt.exe status                          # 'muted' / 'unmuted' (M1)
 ptt.exe mute            /  ptt.exe unmute
@@ -31,6 +34,14 @@ ptt.exe ptt --key 0x41 --device {id}    # bind a key, pick the mic
 The `ptt` session prints its binding, mutes the mic, and unmutes it while the
 bound input is held. Press **Enter** to quit (or **Ctrl+C**); either way it
 restores the mute state it found at start-up.
+
+The tray app (M4) owns the microphone the same way: it starts muted, the icon
+shows Disabled / Muted / Talking, **left click** opens the settings window,
+**right click** opens the menu (Enable/Disable, Open settings, Quit), and
+**closing the window only hides it**. Quit from the menu always hands the
+microphone back. Only one hold-to-talk session can exist at a time — if
+`ptt.exe ptt` is already running, the app says so in its window instead of
+fighting it, and the same works the other way round.
 
 The session also prints the two files it owns (M3):
 
@@ -82,12 +93,45 @@ checklist cannot be observed yet.
       re-installed, plan §7).
 
 ### Tray & settings (M4)
-- [ ] Tray icon shows three distinct states: Disabled / Muted / Talking.
-- [ ] Settings persist across restart.
-- [ ] "Press any key" rebinding works for keyboard and mouse buttons.
-- [ ] Closing the settings window hides to tray (does not quit).
-- [ ] Start with Windows works; `start_hidden` starts hidden.
-- [ ] Second launch focuses the existing instance.
+Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
+
+- [ ] App starts with the mic **muted**; the tray icon reads Muted, the window
+      is hidden (or shown once if `start_hidden = false`).
+- [ ] Tray icon shows three visually distinct states: Disabled / Muted /
+      Talking (hold the bound key to see Talking).
+- [ ] Tray tooltip reads "Push-to-Talk".
+- [ ] Tray menu: **Enable / Disable** switches the hotkey off/on — while
+      Disabled the bound key does nothing and the icon dims.
+- [ ] Left click opens the settings window; right click opens the menu.
+- [ ] Settings window: Change → "Press any key or button" captures a
+      keyboard key **and** a mouse button; the label updates (e.g. "Caps
+      Lock", "Mouse button 4 (back)").
+- [ ] A bare modifier (Ctrl, Shift, Alt, Win alone) is not accepted as a
+      binding — capture keeps waiting until a real key/button arrives.
+- [ ] Device dropdown lists the mics (plus "System default") and the
+      selection survives Save + restart.
+- [ ] Release delay slider (0–2000 ms): hold the key, release — the mic stays
+      unmuted for exactly the set delay.
+- [ ] Swallow off → the bound key still reaches other applications while
+      held; swallow on → it does not.
+- [ ] Sounds toggle + volume are persisted (audio itself is checked in M5).
+- [ ] Start with Windows adds/removes `ptt-tool` under
+      `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+- [ ] `start_hidden = true` → relaunch shows **no window**, only the tray icon.
+- [ ] On-exit choice (hand the microphone back / leave it unmuted) persists
+      and is honoured on Quit.
+- [ ] Closing the settings window **hides** it to the tray; the session keeps
+      running (mic still mute-unmute on the hotkey).
+- [ ] Second launch of `ptt-tool.exe` exits immediately and focuses the first
+      instance's window — no second tray icon.
+- [ ] Only one hold-to-talk owner: with `ptt.exe ptt` running, the app window
+      reports the error instead of fighting it (and vice versa).
+- [ ] Engine error surface: unplug the active mic while enabled → the window
+      shows the error banner and the icon dims; plug back in, press **Save**
+      → session recovers.
+- [ ] Quit from the tray menu: `state.json` ends with `"dirty": false`.
+- [ ] Full acceptance: on a fresh machine the app is usable **without the
+      CLI** — launch → Change key → pick mic → Save → talk.
 
 ### Polish & release (M5)
 - [ ] Sound cues play on talk start/stop; volume setting respected; mute setting silences them.

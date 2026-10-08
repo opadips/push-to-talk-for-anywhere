@@ -1,13 +1,63 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! `ptt-tool` — the app shell: tray, settings window, autostart.
+//! `ptt-tool` — the app shell: tray icon and menu, settings window,
+//! autostart, single instance, and the hold-to-talk session behind them
+//! (plan §9 M4).
 //!
-//! Engine wiring (input -> state machine -> audio, fail-safe) arrives in
-//! milestone M3; the tray and the settings UI in M4. See
-//! IMPLEMENTATION_PLAN.md §9.
+//! The session itself is [`ptt_core::session`] — the same worker the `ptt`
+//! console runs — so the tray and the CLI can never drift apart.
+
+mod app;
+mod commands;
+mod tray;
+
+use tauri::Manager;
 
 fn main() {
+    // Plan §2: rolling file log; the guard must outlive the process.
+    if let Some(guard) = ptt_cli::logging::init() {
+        std::mem::forget(guard);
+    }
+
     tauri::Builder::default()
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // Registered first: a second launch asks the running instance to
+        // show its settings window (plan §9 M4's "focus the existing
+        // instance") and then gives up.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            app::show_settings(app);
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .manage(app::AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::get_settings,
+            commands::get_status,
+            commands::get_devices,
+            commands::binding_label,
+            commands::save_settings,
+            commands::set_enabled,
+            commands::capture_binding,
+        ])
+        // Closing the settings window only hides it: the session keeps
+        // running from the tray (plan §9 M4).
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .setup(app::setup)
+        .build(tauri::generate_context!())
+        .expect("error while building the ptt-tool application")
+        .run(|app: &tauri::AppHandle, event: tauri::RunEvent| {
+            // Plan §6.2: however the process ends, the microphone goes back
+            // first. Quit already did it — this is the last line of defence.
+            if let tauri::RunEvent::Exit = event {
+                if let Err(error) = app::stop_session(&app.state::<app::AppState>()) {
+                    tracing::warn!("stopping the session at exit: {error}");
+                }
+            }
+        });
 }

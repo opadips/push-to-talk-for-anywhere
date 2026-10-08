@@ -9,6 +9,12 @@ license.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+ptt-core = { path = "../crates/ptt-core" }
+ptt-cli = { path = "../crates/ptt-cli" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
