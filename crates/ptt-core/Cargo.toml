@@ -25,6 +25,10 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     # low-level input hooks (plan §7)
     "Win32_UI_WindowsAndMessaging",
+    # raw keyboard input for capture: delivers key presses to our window
+    # even while the settings window's WebView2 owns the keyboard focus,
+    # which the low-level hook chain does not (bug 3)
+    "Win32_UI_Input",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     # WNDCLASSW carries an HBRUSH (notify window for re-installation, §7)

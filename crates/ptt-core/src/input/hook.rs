@@ -19,6 +19,10 @@ use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     PostThreadMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
@@ -31,6 +35,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// `WM_WTS_SESSION_CHANGE` (winuser.h) — windows-rs does not define it.
 const WM_WTS_SESSION_CHANGE: u32 = 0x02B1;
+
+/// `WM_INPUT` (winuser.h) — a raw-input report for the notify window.
+const WM_INPUT: u32 = 0x00FF;
+
+/// `RI_KEY_BREAK` (winuser.h) — a raw keyboard report for a key *release*.
+const RI_KEY_BREAK: u16 = 0x0001;
+
+/// Raw keyboard reports: HID usage page 0x01 (generic desktop), usage 0x06.
+const HID_KEYBOARD_PAGE: u16 = 0x01;
+const HID_KEYBOARD_USAGE: u16 = 0x06;
 
 /// State shared between the hook callbacks (hook thread) and the runner
 /// (any thread).
@@ -68,6 +82,10 @@ static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 /// touches these — the notify window procedure runs on that same thread.
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+/// The notify window, as raw bits, so any thread can hand it to
+/// `RegisterRawInputDevices` (raw input needs an explicit target window).
+static NOTIFY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// One-time markers so a machine's log shows *whether each callback is ever
 /// invoked at all* (bug 3: mouse captures arrived, key presses never did).
@@ -152,6 +170,11 @@ impl InputSource for HookInputSource {
     fn capture_next(&mut self) -> Receiver<Binding> {
         let (tx, rx) = channel();
         shared().capture_tx = Some(tx);
+        // Also listen at the raw-input level: while the settings window owns
+        // the keyboard focus, the low-level chain never reaches our hook
+        // (bug 3), so the hook alone cannot see the press the user is asked
+        // to make. Removed again the moment a press arrives.
+        add_raw_keyboard();
         rx
     }
 
@@ -187,13 +210,17 @@ fn hook_thread(ready: Sender<Result<()>>) {
     };
     store_hooks(keyboard, mouse);
     tracing::info!("input hooks installed (keyboard + mouse)");
-    let _ = ready.send(Ok(()));
 
     // A hidden window on this thread is what receives resume/unlock
     // broadcasts; without it the hooks would silently stop working after a
-    // sleep (plan §7's manual test).
+    // sleep (plan §7's manual test). Created before the session is told
+    // "ready" so a capture armed immediately afterwards already has the
+    // raw-input target (bug 3).
     let window = unsafe { create_notify_window() }.ok();
+    let _ = ready.send(Ok(()));
+
     if let Some(hwnd) = window {
+        NOTIFY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         // Not fatal: the session keeps running, only re-installation is lost.
         let _ = unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
     }
@@ -201,6 +228,7 @@ fn hook_thread(ready: Sender<Result<()>>) {
     unsafe { message_loop() };
 
     if let Some(hwnd) = window {
+        NOTIFY_HWND.store(0, Ordering::SeqCst);
         let _ = unsafe { WTSUnRegisterSessionNotification(hwnd) };
         let _ = unsafe { DestroyWindow(hwnd) };
     }
@@ -327,6 +355,90 @@ fn class_name() -> PCWSTR {
     PCWSTR(name.as_ptr())
 }
 
+/// Ask Windows for raw keyboard reports while a capture is armed.
+///
+/// This exists because of bug 3: while the settings window's WebView2 owns
+/// the keyboard focus, key presses never reach our low-level keyboard hook
+/// (mouse input and unfocused keyboard input are unaffected — observed on
+/// the partner's machine). Raw input is delivered to the notify window
+/// regardless of focus and regardless of any other hook in the low-level
+/// chain, so "press any key" can always see the press.
+fn add_raw_keyboard() {
+    let target = NOTIFY_HWND.load(Ordering::SeqCst);
+    if target == 0 {
+        return;
+    }
+    let device = [RAWINPUTDEVICE {
+        usUsagePage: HID_KEYBOARD_PAGE,
+        usUsage: HID_KEYBOARD_USAGE,
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: HWND(target as *mut _),
+    }];
+    if let Err(error) =
+        unsafe { RegisterRawInputDevices(&device, std::mem::size_of::<RAWINPUTDEVICE>() as u32) }
+    {
+        tracing::warn!("cannot listen to raw keyboard input: {error}");
+    }
+}
+
+/// Stop listening again — a capture listens only between arm and report
+/// (plan §11: the app looks at nothing but what the task needs).
+fn remove_raw_keyboard() {
+    let device = [RAWINPUTDEVICE {
+        usUsagePage: HID_KEYBOARD_PAGE,
+        usUsage: HID_KEYBOARD_USAGE,
+        dwFlags: RIDEV_REMOVE,
+        hwndTarget: HWND::default(),
+    }];
+    let _ =
+        unsafe { RegisterRawInputDevices(&device, std::mem::size_of::<RAWINPUTDEVICE>() as u32) };
+}
+
+/// The binding a raw keyboard report stands for, if it is a press at all
+/// (bug 3's capture path; the pure decision is [`raw_binding`]).
+unsafe fn raw_keyboard_binding(lparam: LPARAM) -> Option<Binding> {
+    let hraw = HRAWINPUT(lparam.0 as *mut _);
+    let header = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+    let mut size = 0u32;
+    // First call: ask for the needed size (returns 0 with `size` filled).
+    if unsafe { GetRawInputData(hraw, RID_INPUT, None, &mut size, header) } != 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size as usize];
+    let read = unsafe {
+        GetRawInputData(
+            hraw,
+            RID_INPUT,
+            Some(buffer.as_mut_ptr().cast()),
+            &mut size,
+            header,
+        )
+    };
+    if read == u32::MAX || (read as usize) < std::mem::size_of::<RAWINPUT>() {
+        return None;
+    }
+    let raw = unsafe { &*buffer.as_ptr().cast::<RAWINPUT>() };
+    if raw.header.dwType != RIM_TYPEKEYBOARD.0 {
+        return None;
+    }
+    let keyboard = unsafe { raw.data.keyboard };
+    raw_binding(
+        keyboard.VKey,
+        keyboard.MakeCode,
+        keyboard.Flags & RI_KEY_BREAK != 0,
+    )
+}
+
+/// Pure decision part of [`raw_keyboard_binding`]: a key *press* becomes
+/// the binding; a release never does (the hook's capture branch has the
+/// same rule for the events it does see).
+fn raw_binding(vkey: u16, makecode: u16, key_up: bool) -> Option<Binding> {
+    (!key_up).then_some(Binding::Key {
+        vk: vkey,
+        scan: makecode,
+    })
+}
+
 /// Notify-window procedure: re-install the hooks when Windows says the
 /// machine resumed or the user came back from the lock screen (plan §7).
 unsafe extern "system" fn notify_proc(
@@ -335,6 +447,26 @@ unsafe extern "system" fn notify_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // A raw keyboard report for an armed capture (bug 3): deliver it the
+    // same way the low-level hook branch does, then stop listening again —
+    // whichever reporter sees the press first wins, the other finds the
+    // capture already spent.
+    if message == WM_INPUT {
+        if let Some(binding) = unsafe { raw_keyboard_binding(lparam) } {
+            let taken = {
+                let mut shared = shared();
+                shared.capture_tx.take()
+            };
+            if let Some(tx) = taken {
+                tracing::info!("captured {binding:?} (raw input)");
+                let _ = tx.send(binding);
+            }
+            // The sink exists only for one capture; this press spent it.
+            remove_raw_keyboard();
+        }
+        // "An application that processes WM_INPUT must return TRUE" — 0.
+        return LRESULT(0);
+    }
     let resumed = message == WM_POWERBROADCAST
         && matches!(
             wparam.0 as u32,
@@ -498,4 +630,23 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return LRESULT(1);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_raw_press_is_the_binding_and_a_release_is_nothing() {
+        // Tab and Caps Lock exactly as the low-level hook reports them.
+        assert_eq!(
+            raw_binding(9, 15, false),
+            Some(Binding::Key { vk: 9, scan: 15 })
+        );
+        assert_eq!(
+            raw_binding(20, 58, false),
+            Some(Binding::Key { vk: 20, scan: 58 })
+        );
+        assert_eq!(raw_binding(9, 15, true), None);
+    }
 }
