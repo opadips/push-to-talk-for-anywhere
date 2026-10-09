@@ -17,6 +17,7 @@
   let {
     selectedVk = null,
     currentLabel = "",
+    target = "ptt",
     onpick,
     onclose,
   }: {
@@ -25,6 +26,8 @@
     selectedVk?: number | null;
     /// What the binding is called today, for the footer.
     currentLabel?: string;
+    /// Which row opened the picker: the toggle-key copy names its binding.
+    target?: "ptt" | "toggle";
     onpick: (vk: number) => void;
     onclose: () => void;
   } = $props();
@@ -110,7 +113,7 @@
     bind:this={dialog}
   >
     <header>
-      <h2 id="vk-title">Choose the hotkey</h2>
+      <h2 id="vk-title">{target === "toggle" ? "Choose the toggle key" : "Choose the hotkey"}</h2>
       <button class="close" onclick={onclose} aria-label="Close without choosing">✕</button>
     </header>
 
@@ -168,7 +171,7 @@
         {#if hovered}
           {describe(hovered)}
         {:else}
-          Click a key to use it as the push-to-talk key.
+          Click a key to use it as the {target === "toggle" ? "toggle" : "push-to-talk"} key.
         {/if}
       </span>
       <span class="current">Now: <strong>{currentLabel || "—"}</strong></span>

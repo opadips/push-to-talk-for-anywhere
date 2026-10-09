@@ -530,6 +530,7 @@ mod tests {
         let message = panic_summary(&"boom", Some(here()));
         assert!(message.starts_with("panic at "), "{message}");
         assert!(message.contains("failsafe.rs"), "{message}");
+        assert!(message.ends_with(": boom"), "{message}");
     }
 
     #[test]

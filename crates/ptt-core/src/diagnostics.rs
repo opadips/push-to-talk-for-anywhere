@@ -16,7 +16,8 @@ pub const STALL_WAIT_MS: u32 = 150;
 /// Our own hook code may take this long and the stall warning may fire.
 pub const STALL_EXEC_MS: u64 = 15;
 
-/// At most one stall warning per device per 5 s (spec §4).
+/// At most one stall warning globally per 5 s (spec §4) — one gate for
+/// every device, so a keyboard stall suppresses a mouse one within the gap.
 pub const STALL_LOG_GAP_MS: u32 = 5_000;
 
 /// The hook thread's message loop is stalled after this much silence.
@@ -55,9 +56,10 @@ pub fn tick_ms() -> u32 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u32
 }
 
-/// One stall warning per device per [`STALL_LOG_GAP_MS`]: the caller passes
-/// the last tick it logged at, the caller stores `now` when this returns
-/// `Some` (the glue below does both).
+/// One stall warning across all devices per [`STALL_LOG_GAP_MS`] (one
+/// global gate, not one per device): the caller passes the last tick it
+/// logged at, the caller stores `now` when this returns `Some` (the glue
+/// below does both).
 pub fn stall_warning(
     device: &str,
     wait_ms: u32,
@@ -185,14 +187,17 @@ impl Watchdog {
             });
         }
 
+        // The callback tick is recorded after the event tick, so in healthy
+        // use `behind` underflows to a huge number — the `u32::MAX / 2`
+        // guard rejects that wrapped region, leaving only genuine staleness.
+        let behind = s.system_input.wrapping_sub(s.callback);
         let hooks_silent = s.callback != 0
             && s.now.wrapping_sub(s.system_input) <= SYSTEM_ACTIVE_WITHIN_MS
-            && s.system_input.wrapping_sub(s.callback) > HOOKS_SILENT_AFTER_MS;
+            && behind > HOOKS_SILENT_AFTER_MS
+            && behind < u32::MAX / 2;
         if hooks_silent && s.now.wrapping_sub(self.hooks_silent) >= REPORT_GAP_MS {
             self.hooks_silent = s.now;
-            findings.push(Finding::HooksSilent {
-                silent_for: s.system_input.wrapping_sub(s.callback),
-            });
+            findings.push(Finding::HooksSilent { silent_for: behind });
         }
 
         let worker_stalled = s.worker != 0 && s.now.wrapping_sub(s.worker) > WORKER_STALLED_MS;
@@ -221,7 +226,8 @@ static LAST_MOUSE_CB: AtomicU32 = AtomicU32::new(0);
 static LAST_HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 /// Last session-worker beat (0 while the worker is gone).
 static LAST_WORKER: AtomicU32 = AtomicU32::new(0);
-/// Last stall-warning log tick, per device via [`maybe_stall_warning`].
+/// Last stall-warning log tick — one global gate for all devices, via
+/// [`maybe_stall_warning`].
 static LAST_STALL_LOG: AtomicU32 = AtomicU32::new(0);
 
 /// Record a keyboard hook callback beat.
@@ -408,6 +414,24 @@ mod tests {
     }
 
     #[test]
+    fn hooks_silent_stays_quiet_when_callbacks_are_newer_than_system_input() {
+        let now = 100_000;
+        let mut watchdog = Watchdog::new(now);
+        let system_input = now - 100;
+        // Healthy use: the callback tick is recorded after the event tick,
+        // so `system_input - callback` underflows — that must not read as
+        // "the hooks have been silent for ~49 days".
+        let healthy = Snapshot {
+            callback: system_input.wrapping_add(3),
+            ..fresh(now)
+        };
+        assert!(
+            watchdog.check(&healthy).is_empty(),
+            "a callback newer than the event tick is healthy, not silent"
+        );
+    }
+
+    #[test]
     fn hooks_silent_stays_quiet_while_callbacks_are_fresh() {
         let now = 100_000;
         let mut watchdog = Watchdog::new(now);
@@ -529,6 +553,40 @@ mod tests {
         assert!(
             watchdog.check(&wrapped).is_empty(),
             "the wrapping diffs are small and consistent"
+        );
+    }
+
+    #[test]
+    fn finding_messages_name_the_stall_and_worker_symptoms() {
+        let hook = Finding::HookThreadStalled { ms: 4_242 }.message();
+        assert!(hook.contains("stalled for 4242 ms"), "{hook}");
+        let worker = Finding::WorkerStalled { ms: 2_500 }.message();
+        assert!(
+            worker.contains("session worker loop stalled for 2500 ms"),
+            "{worker}"
+        );
+    }
+
+    #[test]
+    fn multiple_findings_come_out_in_fixed_order() {
+        let now = 100_000;
+        let mut watchdog = Watchdog::new(now);
+        let system_input = now - 100;
+        let everything = Snapshot {
+            now,
+            hook_thread: now - 5_001,
+            callback: system_input - 60_001,
+            worker: now - 2_001,
+            system_input,
+        };
+        assert_eq!(
+            watchdog.check(&everything),
+            vec![
+                Finding::HookThreadStalled { ms: 5_001 },
+                Finding::HooksSilent { silent_for: 60_001 },
+                Finding::WorkerStalled { ms: 2_001 },
+            ],
+            "all three at once, in the documented order"
         );
     }
 

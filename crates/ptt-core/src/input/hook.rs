@@ -270,8 +270,12 @@ fn hook_thread(ready: Sender<Result<()>>) {
         NOTIFY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         // Heartbeat (spec §4 D2): the notify window beats once a second so
         // the watchdog can tell a stalled message pump from an idle machine.
-        // Log-only — the timer carries no work.
-        let _ = unsafe { SetTimer(Some(hwnd), 1, 1_000, None) };
+        // Log-only — the timer carries no work. A failed timer (0) would
+        // silently kill stall detection, so it is worth a warning.
+        let heartbeat_timer = unsafe { SetTimer(Some(hwnd), 1, 1_000, None) };
+        if heartbeat_timer == 0 {
+            tracing::warn!("cannot start the hook-thread heartbeat timer");
+        }
     }
     let _ = ready.send(Ok(()));
 

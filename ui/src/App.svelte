@@ -516,6 +516,7 @@
         ? (form.toggle.kind === "key" ? form.toggle.vk : null)
         : (form.binding.kind === "key" ? form.binding.vk : null)}
       currentLabel={pickerTarget === "toggle" ? (toggleLabel || "Not set") : label}
+      target={pickerTarget}
       onpick={pickKey}
       onclose={closePicker}
     />
