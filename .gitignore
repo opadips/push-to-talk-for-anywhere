@@ -7,6 +7,10 @@
 AGENTS.md
 CLAUDE.md
 
+# Planning/implementation documents are local-only working files (AGENTS.md)
+/IMPLEMENTATION_PLAN.md
+docs/superpowers/
+
 # Secrets
 .env
 .env.*
