@@ -93,6 +93,10 @@ In settings:
   unmuted.
 - **Sounds** — a short cue when you start and stop talking, with a volume
   slider.
+- **Overlay** — an optional on-screen dot that shows when the mic is open,
+  for fullscreen games where the tray icon can't be seen. It's off by
+  default; the same card turns it on and picks the mode, corner and edge
+  distance. Clicks always pass through it.
 - **App** — start with Windows, start hidden in the tray.
 
 Only one hold-to-talk session at a time. If `ptt.exe ptt` is already running,

@@ -184,11 +184,11 @@ fn positions_place_the_badge_on_the_requested_edge() {
 - Modify: `docs/IDEAS.md` (remove the "On-screen overlay" line)
 - Modify: `README.md` ("Using it": one short paragraph on the optional overlay)
 
-- [ ] **Step 1: Add the manual checklist** — the spec's Manual list as `- [ ]` items, labeled M-1..M-7 (M-1 no white box/shadow, M-2 talk-only hides after fade, M-3 click-through proof, M-4 focus never stolen, M-5 all 6 positions + distance, M-6 live apply on Save incl. disable-removes, M-7 game smoke test).
+- [x] **Step 1: Add the manual checklist** — the spec's Manual list as `- [ ]` items, labeled M-1..M-7 (M-1 no white box/shadow, M-2 talk-only hides after fade, M-3 click-through proof, M-4 focus never stolen, M-5 all 6 positions + distance, M-6 live apply on Save incl. disable-removes, M-7 game smoke test).
 
-- [ ] **Step 2: IDEAS.md + README edits** — remove the overlay idea line (it is now built); README gets 2–3 sentences: optional overlay, off by default, where to turn it on.
+- [x] **Step 2: IDEAS.md + README edits** — remove the overlay idea line (it is now built); README gets 2–3 sentences: optional overlay, off by default, where to turn it on.
 
-- [ ] **Step 3: Commit** — `git add docs README.md && git commit -m "docs: overlay manual checklist and readme note"`
+- [x] **Step 3: Commit** — `git add docs README.md && git commit -m "docs: overlay manual checklist and readme note"`
 
 ### Task 6: Full gate, push, CI, handoff
 

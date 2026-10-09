@@ -167,6 +167,39 @@ Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
 - [ ] Clean VM: install → configure → use → uninstall.
 - [ ] After uninstall, the mic is in a sane state (not stuck muted).
 
+### On-screen overlay (badge) — M-1…M-7
+
+Turn it on first: settings → **Overlay** → tick the box → **Save**. The
+overlay is opt-in; with `[overlay] enabled = false` (the default) no window
+exists at all.
+
+- [ ] **M-1 Appearance** — only a small glowing dot is visible: no white
+      box, no rectangular shadow, no frame, no taskbar or Alt-Tab entry.
+      Talking shows a bright red pulsing dot; "Always" mode shows a dim
+      grey dot while muted.
+- [ ] **M-2 talk-only** (default): the dot appears on key-down and fades
+      out after release — and the badge stays bright for the whole
+      **release delay**, disappearing only when the mic actually mutes.
+      Afterwards nothing is left on screen. While Disabled, the badge
+      never shows (either mode).
+- [ ] **M-3 Click-through** — park the badge over something clickable
+      underneath (e.g. a button at the edge of a window): the click
+      reaches the window below; the badge never swallows it.
+- [ ] **M-4 Focus** — in talk-only mode, press and release the hotkey
+      repeatedly **while typing in another app or a game**: focus must
+      never jump to the badge — typing continues, the game keeps
+      receiving keys. (The known-risk check; record what you observe.)
+- [ ] **M-5 Positions** — all six positions render at the chosen corner /
+      edge, the centre variants are horizontally centred, and the
+      distance slider (0–200 px) moves the badge as set.
+- [ ] **M-6 Live apply** — change position / mode / distance and **Save**:
+      the badge updates immediately, no restart. Untick the overlay and
+      Save: the badge vanishes immediately; re-tick + Save: it returns.
+- [ ] **M-7 Game smoke test** — with a fullscreen / borderless game
+      focused, use the hotkey with the overlay on: the badge tracks
+      talking, the game never loses input or focus, and performance is
+      unchanged in practice.
+
 ## Known limitations (confirm and record, plan §7)
 
 - [ ] Elevated (admin) window focused: hotkey does **not** fire (UIPI) — as documented.

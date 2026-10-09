@@ -8,7 +8,6 @@ Add to this list instead of growing the v1 scope.
 - Per-application profiles
 - Noise suppression
 - Mute lock (ignore mute changes made by drivers/apps — `IAudioEndpointVolumeCallback`)
-- On-screen overlay
 - Raw Input backend for hold-to-talk as well (already used for capture —
   bug 3: while the settings window's WebView2 has keyboard focus, key
   presses never reach the low-level keyboard hook, so holding the binding
