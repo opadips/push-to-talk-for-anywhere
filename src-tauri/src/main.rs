@@ -60,6 +60,14 @@ fn main() {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            // The badge rebuilds here: `Destroyed` is the first moment its
+            // label is free again (tauri core removes it in `on_window_close`
+            // before these handlers run — overlay.rs has the full ordering).
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "overlay" {
+                    overlay::recreate_after_destroy(window.app_handle());
+                }
+            }
         })
         .setup(app::setup)
         .build(tauri::generate_context!())

@@ -22,16 +22,15 @@ const dot = document.getElementById("dot") as HTMLDivElement;
 const win = getCurrentWindow();
 
 // The window is created visible with an invisible dot (no flash) and is
-// destroyed/recreated whenever settings change, so "talk-only" is the
+// destroyed/recreated whenever the mode changes, so "talk-only" is the
 // only state this page ever has to learn (spec: mode read once on load).
 let mode: OverlaySettings["mode"] = "talk-only";
 let hideTimer: number | null = null;
 let shown = true;
 
-// Idempotent show/hide: the status event arrives every ~100ms, and a
-// redundant show() is not just chatter — on Windows it can re-attempt
-// activation (see the plan's M-4 execution note), so only the actual
-// hidden→visible edges may call the window.
+// Idempotent show/hide: only the actual hidden→visible edges may call the
+// window — on Windows a show() re-attempts activation (see the plan's M-4
+// execution note), so redundant calls are not just chatter.
 function show() {
   if (!shown) {
     shown = true;
@@ -46,39 +45,52 @@ function hide() {
   }
 }
 
-// Map one engine state to dot + window (the spec's behavior table).
-function apply(state: UiStatus["state"]) {
+// The dot breathes out over the CSS 300ms transition; the window is
+// hidden once that has finished. A repeated "goes away" state never
+// restarts the clock (the poller re-emits when e.g. `error` changes
+// alongside the state).
+function startFade() {
+  if (hideTimer !== null) return;
+  hideTimer = window.setTimeout(() => {
+    hideTimer = null;
+    dot.className = "";
+    hide();
+  }, 350);
+}
+
+function cancelFade() {
   if (hideTimer !== null) {
     clearTimeout(hideTimer);
     hideTimer = null;
   }
+}
 
+// Map one engine state to dot + window (the spec's behavior table).
+function apply(state: UiStatus["state"]) {
   if (state === "talking") {
     // ReleasePending serializes as "talking" too — the mic really is
     // open, so the badge stays bright until it mutes.
+    cancelFade();
     dot.className = "talking";
     show();
     return;
   }
 
   if (state === "muted" && mode === "always") {
+    cancelFade();
     dot.className = "dim";
     show();
     return;
   }
 
-  // Talk-only, muted: fade the dot out (CSS, 300ms) and then hide the
-  // window so nothing paints while muted.
-  if (mode === "talk-only" && state === "muted" && dot.className === "talking") {
-    hideTimer = window.setTimeout(() => {
-      hideTimer = null;
-      dot.className = "";
-      hide();
-    }, 350);
+  // Everything else takes the badge away. A bright dot (talk-only muted,
+  // or disabled mid-talk) fades out first — the spec fades the dot
+  // whenever the state leaves Talking/ReleasePending.
+  if (dot.className === "talking") {
+    startFade();
     return;
   }
-
-  // Disabled (both modes) and talk-only muted without a dot to fade.
+  cancelFade();
   dot.className = "";
   hide();
 }
@@ -91,14 +103,22 @@ async function start() {
     // "talk-only" is the spec's default and the safe one.
   }
 
+  // Listen before taking the snapshot: the poller only emits on change, so
+  // a transition landing between get_status and listen would otherwise
+  // leave the badge stale until the *next* change.
+  let sawEvent = false;
+  await listen<UiStatus>("status", (event) => {
+    sawEvent = true;
+    apply(event.payload.state);
+  });
+  if (sawEvent) return;
+
   try {
     const status = await invoke<UiStatus>("get_status");
-    apply(status.state);
+    if (!sawEvent) apply(status.state);
   } catch {
-    // The first status event (within ~100ms) corrects us.
+    // No snapshot and no event yet: the next change corrects us.
   }
-
-  await listen<UiStatus>("status", (event) => apply(event.payload.state));
 }
 
 void start();

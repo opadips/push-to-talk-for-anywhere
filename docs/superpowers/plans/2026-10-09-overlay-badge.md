@@ -212,3 +212,30 @@ fn positions_place_the_badge_on_the_requested_edge() {
   always-mode already never calls show() after creation), rather than the
   planned `WS_EX_NOACTIVATE` patch, which MSDN indicates `SetWindowPos` (what
   `SW_SHOW` uses) can override. Always-on-top + skip-taskbar stay as-is.
+- **Post-build review round (fix-first → all fixed; every claim verified
+  against source before implementing):** the fresh-context end review found
+  three blockers:
+  1. Task 2 had dropped `set_ignore_cursor_events(true)` — the badge would
+     have swallowed clicks (breaks M-3). Now set right after `build()`.
+  2. `capabilities/default.json` granted `core:default` only to `main`, so
+     the overlay page's `listen`/`show`/`hide` would be ACL-rejected (the
+     badge would render one static snapshot and never update). Fixed:
+     `overlay` label added plus `core:window:allow-show`/`allow-hide`
+     (`core:window:default` really lacks both — verified in the generated
+     acl manifests).
+  3. Destroy-then-recreate in one sync pass is impossible: `destroy()` is
+     always proxied to the event loop (inline handling panics) and the
+     window label is freed only when `Destroyed` is processed. Fixed: a
+     pure `decide()` state machine (unit-tested — `sync_decisions_follow_the_window_lifecycle`)
+     plus a `RECREATE_PENDING` flag; the rebuild runs in the `Destroyed`
+     window-event handler, which tauri core reaches after `on_window_close`
+     frees the label (both orderings verified in tauri 2.12.1 /
+     tauri-runtime-wry). Position/distance-only changes now `set_position`
+     without a page reload, and an unchanged overlay is a no-op (a
+     volume-only Save no longer flickers the badge).
+  Also from the same review: the page registers its `status` listener before
+  the `get_status` snapshot (with a `sawEvent` guard) so no transition can
+  be missed; disabled-mid-talk fades out per the spec; repeated muted
+  events no longer restart the 350 ms fade. Monitor fallback per plan:
+  primary → the settings window's monitor, offset into that monitor's
+  coordinates. M-3/M-4 remain manual checks.
