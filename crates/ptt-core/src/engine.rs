@@ -113,6 +113,19 @@ impl<C: MicController> Engine<C> {
         self.fire(Event::Tick(now), now)
     }
 
+    /// The toggle key was cleared while the mic is latched open: unlatch
+    /// through the usual release path (release delay + stop cue), because
+    /// no key is left that could do it. A no-op while not latched.
+    ///
+    /// Returns the instant a release timer should be armed for, if any.
+    pub fn unlatch(&mut self, now: Instant) -> Result<Option<Instant>> {
+        if self.latched {
+            self.latched = false;
+            return self.fire(Event::PttUp, now);
+        }
+        Ok(None)
+    }
+
     /// One toggle press: flip between latched (mic open until the next
     /// press) and the normal release path.
     ///
@@ -525,6 +538,103 @@ mod tests {
             .unwrap();
         assert_eq!(armed, None, "no timer is needed");
         assert_eq!(eng.mic().calls(), vec![true, false, true]);
+    }
+
+    #[test]
+    fn unlatch_is_a_noop_unless_latched() {
+        let mut eng = engine(200);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+
+        assert_eq!(eng.unlatch(t0).unwrap(), None);
+        assert_eq!(
+            eng.mic().calls(),
+            vec![true],
+            "an unarmed engine is never touched"
+        );
+        assert_eq!(eng.state(), &State::Muted);
+    }
+
+    #[test]
+    fn unlatch_runs_through_the_release_delay() {
+        let (mut eng, sound) = engine_with_sounds(200);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+        eng.input(InputEvent::ToggleDown, t0).unwrap(); // latch
+
+        let at = t0 + Duration::from_millis(150);
+        let armed = eng.unlatch(at).unwrap();
+        assert_eq!(armed, Some(at + Duration::from_millis(200)));
+        assert_eq!(eng.mic().calls(), vec![true, false], "not muted yet");
+
+        eng.tick(at + Duration::from_millis(200)).unwrap();
+        assert_eq!(eng.mic().calls(), vec![true, false, true]);
+        assert_eq!(sound.cues(), vec![Cue::Start, Cue::Stop]);
+    }
+
+    #[test]
+    fn unlatch_with_zero_release_delay_mutes_immediately() {
+        let (mut eng, sound) = engine_with_sounds(0);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+        eng.input(InputEvent::ToggleDown, t0).unwrap(); // latch
+
+        let armed = eng.unlatch(t0 + Duration::from_millis(150)).unwrap();
+        assert_eq!(armed, None, "no timer is needed");
+        assert_eq!(eng.mic().calls(), vec![true, false, true]);
+        assert_eq!(sound.cues(), vec![Cue::Start, Cue::Stop]);
+    }
+
+    #[test]
+    fn toggle_latches_from_release_pending() {
+        let mut eng = engine(200);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        let deadline = eng.input(InputEvent::BindingUp, t0).unwrap().unwrap();
+
+        eng.input(InputEvent::ToggleDown, t0 + Duration::from_millis(120))
+            .unwrap();
+        assert_eq!(eng.state(), &State::Talking);
+        assert_eq!(eng.mic().calls(), vec![true, false], "the mic stays open");
+
+        // The tick armed before the latch must not mute under it.
+        eng.tick(deadline).unwrap();
+        assert_eq!(eng.mic().calls(), vec![true, false], "still open");
+    }
+
+    #[test]
+    fn the_same_key_bound_to_ptt_and_toggle_self_resolves() {
+        let mut eng = engine(0);
+        let t0 = Instant::now();
+        eng.enable(t0).unwrap();
+
+        // One key watched as both binding and toggle: the hook's press
+        // answers on both channels, in this order.
+        eng.input(InputEvent::BindingDown, t0).unwrap();
+        eng.input(InputEvent::ToggleDown, t0).unwrap();
+        assert_eq!(
+            eng.mic().calls(),
+            vec![true, false],
+            "latched with the mic open"
+        );
+        assert_eq!(eng.state(), &State::Talking);
+
+        // The matching release is dropped while latched...
+        eng.input(InputEvent::BindingUp, t0).unwrap();
+        assert_eq!(eng.mic().calls(), vec![true, false], "still open");
+
+        // ...and the next press resolves itself through the toggle press.
+        let next = t0 + Duration::from_millis(150);
+        eng.input(InputEvent::BindingDown, next).unwrap();
+        eng.input(InputEvent::ToggleDown, next).unwrap();
+        assert_eq!(
+            eng.mic().calls(),
+            vec![true, false, true],
+            "unlatched through the release path"
+        );
+        assert_eq!(eng.state(), &State::Muted);
     }
 
     #[test]

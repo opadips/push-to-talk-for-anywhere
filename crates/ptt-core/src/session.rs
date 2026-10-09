@@ -178,7 +178,9 @@ impl SessionHandle {
 
     /// The settings window saved a new binding: it reaches the running hook
     /// without a restart (plan §4). `toggle` is the optional second binding
-    /// as `(binding, swallow)`; `None` leaves the toggle unbound.
+    /// as `(binding, swallow)`; `None` leaves the toggle unbound — and, if
+    /// the mic is latched open, closes it through the release path, since
+    /// no key is left that could.
     pub fn rebind(&self, binding: Binding, swallow: bool, toggle: Option<(Binding, bool)>) {
         let _ = self.commands.send(Command::Rebind {
             binding,
@@ -347,7 +349,16 @@ fn pump<C: MicController, S: InputSource>(
                     binding,
                     swallow,
                     toggle,
-                }) => source.set_binding(binding, swallow, toggle),
+                }) => {
+                    source.set_binding(binding, swallow, toggle);
+                    // Clearing the toggle while the mic is latched must not
+                    // strand it open: no key is left that could unlatch it.
+                    // The armed instant is ignored — the deadline is
+                    // recomputed from the engine state at the loop's end.
+                    if toggle.is_none() {
+                        let _ = engine.unlatch(Instant::now())?;
+                    }
+                }
                 Ok(Command::SetSounds(sounds)) => engine.set_sounds(sounds),
                 Ok(Command::Capture(reply)) => {
                     info!("capture armed: the next key press becomes the binding");
@@ -830,6 +841,35 @@ mod tests {
             wait_until(|| source.toggle().is_none()),
             "the toggle is unbound again"
         );
+
+        session.stop().unwrap();
+    }
+
+    #[test]
+    fn clearing_the_toggle_unlatches_a_latched_mic() {
+        let mic = SharedMic::default();
+        let source = FakeSource::default();
+        let session = SessionHandle::start(
+            config(50),
+            mic.clone(),
+            source.clone(),
+            scratch("toggle-unlatch"),
+            true,
+        )
+        .unwrap();
+
+        source.press(InputEvent::ToggleDown);
+        assert!(
+            wait_until(|| mic.calls() == vec![true, false]),
+            "the toggle latched the mic open"
+        );
+
+        session.rebind(Binding::Mouse(MouseButton::X1), true, None);
+        assert!(
+            wait_until(|| mic.calls() == vec![true, false, true]),
+            "clearing the toggle must not strand the mic open"
+        );
+        assert!(wait_until(|| session.status().state == SessionState::Muted));
 
         session.stop().unwrap();
     }
