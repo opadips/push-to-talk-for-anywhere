@@ -12,7 +12,9 @@
 
   // --- shapes the Rust side serializes (plan §8, §9 M4) -------------------
   type BindingConfig = {
-    kind: "key" | "mouse";
+    // `""` is the toggle's unbound state (its neutral state before the
+    // feature existed); the PTT binding is always "key" or "mouse".
+    kind: "" | "key" | "mouse";
     vk: number;
     scan: number;
     mouse_button: string;
@@ -22,6 +24,7 @@
     version: number;
     enabled: boolean;
     binding: BindingConfig;
+    toggle: BindingConfig;
     audio: { device_id: string; release_delay_ms: number; on_exit: "restore" | "unmute" };
     sounds: { enabled: boolean; volume: number };
     app: { start_with_windows: boolean; start_hidden: boolean };
@@ -41,13 +44,18 @@
   type DeviceInfo = { id: string; name: string; is_default: boolean };
   // serde's external tagging: {"Key": {...}} or {"Mouse": "X1"}
   type Captured = { Key: { vk: number; scan: number } } | { Mouse: string };
+  // Which binding a running capture will write to: the PTT key or the
+  // toggle key (the on-screen keyboard stays PTT-only in v1).
+  type CaptureTarget = "ptt" | "toggle";
 
   let settings = $state<Config | null>(null); // what is on disk
   let form = $state<Config | null>(null); // what the user is editing
   let devices = $state<DeviceInfo[]>([]);
   let status = $state<UiStatus | null>(null);
   let label = $state("");
+  let toggleLabel = $state("");
   let capturing = $state(false);
+  let captureTarget = $state<CaptureTarget>("ptt");
   let pickerOpen = $state(false);
   let pickerButton = $state<HTMLButtonElement | undefined>();
   let busy = $state(false);
@@ -64,6 +72,15 @@
       form.binding.kind === "key" &&
       form.binding.swallow &&
       isShiftCtrlAltVk(form.binding.vk),
+  );
+
+  // The same warning for the toggle key: blocking Shift/Ctrl/Alt with the
+  // toggle binding would break them everywhere just the same.
+  let blocksToggleModifier = $derived(
+    !!form &&
+      form.toggle.kind === "key" &&
+      form.toggle.swallow &&
+      isShiftCtrlAltVk(form.toggle.vk),
   );
 
   let stateLabel = $derived(
@@ -94,6 +111,7 @@
       devices = await invoke<DeviceInfo[]>("get_devices").catch(() => []);
       status = await invoke<UiStatus>("get_status");
       label = await labelFor(form);
+      toggleLabel = await toggleLabelFor(form);
       // The tray pushes state changes; the chip and the banner follow them.
       unlisten = await listen<UiStatus>("status", (event) => {
         status = event.payload;
@@ -117,6 +135,15 @@
     return invoke<string>("binding_label", { settings: clone(config) }).catch(() => "…");
   }
 
+  /// The display name of the toggle binding — "Not set" while it is
+  /// unbound. Mirrors `labelFor`: refreshed on mount and after a save
+  /// (the Clear button updates `toggleLabel` directly instead).
+  async function toggleLabelFor(config: Config): Promise<string> {
+    return invoke<string>("toggle_binding_label", { settings: clone(config) }).catch(
+      () => "…",
+    );
+  }
+
   async function save() {
     if (!form) return;
     busy = true;
@@ -132,6 +159,7 @@
       settings = await invoke<Config>("save_settings", { settings: payload });
       form = clone(settings);
       label = await labelFor(form);
+      toggleLabel = await toggleLabelFor(form);
       flash("Saved");
     } catch (error) {
       flash(String(error));
@@ -182,18 +210,32 @@
     if (cancelBackend) invoke("cancel_capture").catch(() => {});
   }
 
-  async function applyCaptured(captured: Captured) {
+  async function applyCaptured(captured: Captured, target: CaptureTarget) {
     if (!form) return;
+    const bound = target === "toggle" ? form.toggle : form.binding;
     if ("Key" in captured) {
-      form.binding.kind = "key";
-      form.binding.vk = captured.Key.vk;
-      form.binding.scan = captured.Key.scan;
-      form.binding.mouse_button = "";
+      bound.kind = "key";
+      bound.vk = captured.Key.vk;
+      bound.scan = captured.Key.scan;
+      bound.mouse_button = "";
     } else {
-      form.binding.kind = "mouse";
-      form.binding.mouse_button = String(captured.Mouse).toLowerCase();
+      bound.kind = "mouse";
+      bound.mouse_button = String(captured.Mouse).toLowerCase();
     }
-    label = await labelFor(form);
+    if (target === "toggle") {
+      toggleLabel = await toggleLabelFor(form);
+    } else {
+      label = await labelFor(form);
+    }
+  }
+
+  // Reset the toggle binding to its neutral state — unbound — and say so
+  // right away (the backend label comes back the next time it is asked,
+  // on mount or after a save).
+  function clearToggle() {
+    if (!form) return;
+    form.toggle = { kind: "", vk: 0, scan: 0, mouse_button: "", swallow: true };
+    toggleLabel = "Not set";
   }
 
   function onCaptureKey(event: KeyboardEvent) {
@@ -211,19 +253,20 @@
     endCapture(true);
     // The page has no scan code. It is stored but never matched on — the
     // hook compares `vk` only — and 0 passes the config validation.
-    void applyCaptured({ Key: { vk, scan: 0 } });
+    void applyCaptured({ Key: { vk, scan: 0 } }, captureTarget);
   }
 
-  async function capture() {
+  async function capture(target: CaptureTarget) {
     if (!form || capturing) return;
     const id = ++captureId;
+    captureTarget = target;
     capturing = true;
     window.addEventListener("keydown", onCaptureKey, true);
     try {
       const captured = await invoke<Captured>("capture_binding");
       if (id !== captureId) return; // the page already answered (or cancelled)
       endCapture(false);
-      await applyCaptured(captured);
+      await applyCaptured(captured, target);
     } catch (error) {
       // A request we cancelled ourselves ends with an error: not news.
       if (id === captureId) {
@@ -252,7 +295,8 @@
 
   async function pickKey(vk: number) {
     closePicker();
-    await applyCaptured({ Key: { vk, scan: 0 } });
+    // The on-screen keyboard only ever targets the PTT binding (v1).
+    await applyCaptured({ Key: { vk, scan: 0 } }, "ptt");
   }
 
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
@@ -291,8 +335,8 @@
       <div class="row">
         <span class="binding">{label}</span>
         <span class="actions">
-          <button onclick={capture} disabled={capturing || busy}>
-            {capturing ? "Press any key or button…" : "Change"}
+          <button onclick={() => capture("ptt")} disabled={capturing || busy}>
+            {capturing && captureTarget === "ptt" ? "Press any key or button…" : "Change"}
           </button>
           <button
             bind:this={pickerButton}
@@ -309,6 +353,32 @@
         Also block the key from other applications
       </label>
       {#if blocksModifier}
+        <p class="warn">
+          This key is Shift, Ctrl or Alt: blocking it stops it working in every program. Untick
+          the box above unless that is what you want.
+        </p>
+      {/if}
+      <div class="row toggle-row">
+        <span class="binding">
+          <span class="toggle-caption">Toggle key (press once to talk)</span>
+          {toggleLabel || "Not set"}
+        </span>
+        <span class="actions">
+          <button onclick={() => capture("toggle")} disabled={capturing || busy}>
+            {capturing && captureTarget === "toggle" ? "Press any key or button…" : "Change"}
+          </button>
+          <button onclick={clearToggle} disabled={capturing || busy}>Clear</button>
+        </span>
+      </div>
+      <label class="check">
+        <input
+          type="checkbox"
+          bind:checked={form.toggle.swallow}
+          disabled={form.toggle.kind === ""}
+        />
+        Also block the toggle key from other applications
+      </label>
+      {#if blocksToggleModifier}
         <p class="warn">
           This key is Shift, Ctrl or Alt: blocking it stops it working in every program. Untick
           the box above unless that is what you want.
@@ -555,6 +625,20 @@
     display: flex;
     flex: 0 0 auto;
     gap: 0.5rem;
+  }
+  .toggle-row {
+    margin-top: 0.85rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid #24282e;
+  }
+  .toggle-caption {
+    display: block;
+    font-size: 0.78rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9aa0a6;
+    margin-bottom: 0.15rem;
   }
   .check {
     display: flex;
