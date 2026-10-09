@@ -44,8 +44,8 @@
   type DeviceInfo = { id: string; name: string; is_default: boolean };
   // serde's external tagging: {"Key": {...}} or {"Mouse": "X1"}
   type Captured = { Key: { vk: number; scan: number } } | { Mouse: string };
-  // Which binding a running capture will write to: the PTT key or the
-  // toggle key (the on-screen keyboard stays PTT-only in v1).
+  // Which binding a running capture — or the on-screen keyboard picker —
+  // will write to: the PTT key or the toggle key.
   type CaptureTarget = "ptt" | "toggle";
 
   let settings = $state<Config | null>(null); // what is on disk
@@ -57,7 +57,9 @@
   let capturing = $state(false);
   let captureTarget = $state<CaptureTarget>("ptt");
   let pickerOpen = $state(false);
-  let pickerButton = $state<HTMLButtonElement | undefined>();
+  let pickerTarget = $state<CaptureTarget>("ptt");
+  // The button that opened the dialog — focus goes back to it on close.
+  let pickerOpener = $state<HTMLButtonElement | undefined>();
   let busy = $state(false);
   let notice = $state<string | null>(null);
 
@@ -282,21 +284,22 @@
   // hands back a virtual-key code and the draft binding changes exactly as it
   // does after "press any key". (There is no scan code to give — it is stored
   // but never matched on, see `onCaptureKey`.)
-  function openPicker() {
+  function openPicker(target: CaptureTarget, event: MouseEvent) {
     if (!form || capturing) return;
+    pickerTarget = target;
+    pickerOpener = event.currentTarget as HTMLButtonElement;
     pickerOpen = true;
   }
 
   function closePicker() {
     pickerOpen = false;
     // Hand the focus back to the button that opened the dialog.
-    queueMicrotask(() => pickerButton?.focus());
+    queueMicrotask(() => pickerOpener?.focus());
   }
 
   async function pickKey(vk: number) {
     closePicker();
-    // The on-screen keyboard only ever targets the PTT binding (v1).
-    await applyCaptured({ Key: { vk, scan: 0 } }, "ptt");
+    await applyCaptured({ Key: { vk, scan: 0 } }, pickerTarget);
   }
 
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
@@ -339,8 +342,7 @@
             {capturing && captureTarget === "ptt" ? "Press any key or button…" : "Change"}
           </button>
           <button
-            bind:this={pickerButton}
-            onclick={openPicker}
+            onclick={(e) => openPicker("ptt", e)}
             disabled={capturing || busy}
             title="Click the key on an on-screen keyboard instead of pressing it"
           >
@@ -366,6 +368,13 @@
         <span class="actions">
           <button onclick={() => capture("toggle")} disabled={capturing || busy}>
             {capturing && captureTarget === "toggle" ? "Press any key or button…" : "Change"}
+          </button>
+          <button
+            onclick={(e) => openPicker("toggle", e)}
+            disabled={capturing || busy}
+            title="Click the key on an on-screen keyboard instead of pressing it"
+          >
+            On-screen keyboard
           </button>
           <button onclick={clearToggle} disabled={capturing || busy}>Clear</button>
         </span>
@@ -503,8 +512,10 @@
 
   {#if pickerOpen && form}
     <VirtualKeyboard
-      selectedVk={form.binding.kind === "key" ? form.binding.vk : null}
-      currentLabel={label}
+      selectedVk={pickerTarget === "toggle"
+        ? (form.toggle.kind === "key" ? form.toggle.vk : null)
+        : (form.binding.kind === "key" ? form.binding.vk : null)}
+      currentLabel={pickerTarget === "toggle" ? (toggleLabel || "Not set") : label}
       onpick={pickKey}
       onclose={closePicker}
     />

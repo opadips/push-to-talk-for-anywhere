@@ -203,9 +203,10 @@ exists at all.
 ### Toggle key (press once to talk) — TG-1…TG-9
 
 Set it up in settings → **Hotkey**: press **Change**, then press a key or
-mouse button (the same capture as the PTT binding, no on-screen keyboard
-for it); **Clear** removes it. An unbound toggle reads **"Not set"** — the
-default. TG-2 onwards assume a toggle key is bound and Saved.
+mouse button (the same capture as the PTT binding, or pick the key on the
+on-screen keyboard — see OSK-1); **Clear** removes it. An unbound toggle
+reads **"Not set"** — the default. TG-2 onwards assume a toggle key is
+bound and Saved.
 
 - [ ] **TG-1 Fresh config** — on a fresh `config.toml` the toggle row
       reads "Not set" (nothing bound), and the app behaves exactly as
@@ -238,6 +239,18 @@ default. TG-2 onwards assume a toggle key is bound and Saved.
       releasing it does nothing — no flip on release.
 - [ ] **TG-9 Sounds off** — untick "Play the talk / release sounds" +
       Save: toggling is silent but still flips the mic open/closed.
+
+### On-screen keyboard for the toggle key — OSK-1…OSK-2
+
+- [ ] **OSK-1 Pick for toggle** — settings → Hotkey: **On-screen keyboard**
+      on the *Toggle key* row opens the dialog with the **toggle** key
+      highlighted (not the PTT key); pick a key → only the toggle row
+      changes; **Save** → that key toggles talk.
+- [ ] **OSK-2 Rows stay independent** — the dialog opened from the *Hotkey*
+      row highlights the **PTT** key and picking changes only that row; a
+      modifier (Left Shift) picked for the toggle shows the modifier
+      warning; Win keys are greyed on both rows; nothing persists before
+      **Save**.
 
 ## Known limitations (confirm and record, plan §7)
 
