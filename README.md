@@ -1,6 +1,25 @@
-# Push-to-Talk for Anywhere
+<h1 align="center">Push-to-Talk for Anywhere</h1>
 
-“Windows 10/11” 
+<p align="center"><b>Hold a key to unmute your mic in any Windows app.</b><br>
+Browser meetings, games, OBS: no built-in push-to-talk needed.</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white" alt="Windows 10/11">
+  <img src="https://img.shields.io/github/license/opadips/push-to-talk-for-anywhere" alt="MIT license">
+  <a href="https://github.com/opadips/push-to-talk-for-anywhere/releases"><img src="https://img.shields.io/github/downloads/opadips/push-to-talk-for-anywhere/total" alt="Downloads"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Core-Rust-b7410e?logo=rust&logoColor=white" alt="Core: Rust">
+  <img src="https://img.shields.io/badge/App%20shell-Tauri-24C8D8?logo=tauri&logoColor=white" alt="App shell: Tauri">
+</p>
+
+<p align="center"><a href="https://github.com/opadips/push-to-talk-for-anywhere/releases/latest"><b>⬇ Download for Windows</b></a></p>
+
+<p align="center"><img src="demo/push-to-talk-demo.gif" width="800" alt="Hold a key and the mic unmutes; let go and it mutes again"></p>
+
+https://github.com/user-attachments/assets/91435ad1-81fe-4a5f-88dd-35855c953adb
+
 
 A small tray app that keeps your microphone muted and only unmutes it while you
 hold a key (or a mouse button). Whatever you're in — a browser tab, a game, a
@@ -137,6 +156,10 @@ the work).
 No network access anywhere. No telemetry. The hook compares your input against
 the one bound key/button and that's all — nothing else is captured, logged, or
 stored.
+
+## have idea or found a bug? 
+
+[🐛 Report Bug](https://github.com/opadips/push-to-talk-for-anywhere/issues) · [💡 Request Feature](https://github.com/opadips/push-to-talk-for-anywhere/issues)
 
 ## License
 
