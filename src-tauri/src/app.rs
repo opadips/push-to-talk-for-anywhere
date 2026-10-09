@@ -271,8 +271,11 @@ pub fn apply_settings(state: &AppState, mut settings: Config) -> Result<Config, 
             start_session(state)?;
         } else if current.binding() != settings.binding()
             || current.binding.swallow != settings.binding.swallow
+            || current.toggle_binding() != settings.toggle_binding()
+            || current.toggle.swallow != settings.toggle.swallow
         {
-            // The hook takes a new binding without a restart (plan §4).
+            // The hook takes a new binding without a restart (plan §4) —
+            // the toggle likewise, and it never warrants one either.
             let toggle = settings
                 .toggle_binding()
                 .map(|b| (b, settings.toggle.swallow));

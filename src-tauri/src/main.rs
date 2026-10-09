@@ -48,6 +48,7 @@ fn main() {
             commands::get_status,
             commands::get_devices,
             commands::binding_label,
+            commands::toggle_binding_label,
             commands::save_settings,
             commands::set_enabled,
             commands::capture_binding,

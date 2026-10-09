@@ -26,6 +26,16 @@ pub fn binding_label(settings: Config) -> String {
     settings.binding().label()
 }
 
+/// The name the window shows for the optional toggle binding — "Not set"
+/// while the toggle is unbound (its neutral state).
+#[tauri::command]
+pub fn toggle_binding_label(settings: Config) -> String {
+    settings
+        .toggle_binding()
+        .map(|b| b.label())
+        .unwrap_or_else(|| "Not set".to_string())
+}
+
 /// The device dropdown (plan §9 M4).
 #[tauri::command]
 pub fn get_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, String> {
