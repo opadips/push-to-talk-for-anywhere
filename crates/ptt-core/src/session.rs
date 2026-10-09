@@ -8,6 +8,7 @@
 
 use crate::audio::MicController;
 use crate::config::{Config, OnExit, SoundsConfig};
+use crate::diagnostics;
 use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::failsafe::{self, StateFile};
@@ -268,6 +269,9 @@ fn worker<C: MicController, S: InputSource>(
     on_exit: OnExit,
 ) -> Result<()> {
     let outcome = pump(&mut engine, &mut source, &events, &commands, &status);
+    // A panicking or stalled worker never reaches this line — its stale beat
+    // is real evidence; a clean shutdown zeroes it (no false WorkerStalled).
+    diagnostics::note_worker_gone();
 
     source.stop();
     let shutdown = engine.shutdown(Instant::now()).map(|_| ());
@@ -313,6 +317,7 @@ fn pump<C: MicController, S: InputSource>(
     let mut capture: Option<(Receiver<Binding>, Sender<Binding>)> = None;
 
     loop {
+        diagnostics::note_worker();
         let now = Instant::now();
         let timeout = deadline
             .map(|at| at.saturating_duration_since(now))

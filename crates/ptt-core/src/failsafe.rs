@@ -102,12 +102,30 @@ pub fn restore(ctl: &dyn MicController, state: &StateFile, path: &Path) -> Resul
     Ok(())
 }
 
+/// Spec §4 D6: one log line for a panic — where it happened and what
+/// panicked, whatever the payload type.
+pub fn panic_summary(
+    payload: &(dyn std::any::Any + Send),
+    location: Option<&std::panic::Location<'_>>,
+) -> String {
+    let text = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    match location {
+        Some(location) => format!("panic at {location}: {text}"),
+        None => format!("panic: {text}"),
+    }
+}
+
 /// Plan §6.3: attempt the restore before the process dies. The caller
 /// supplies the restore logic because only it knows how to reach the
 /// microphone from whichever thread is panicking.
 pub fn install_panic_hook(restore: impl Fn() + Send + Sync + 'static) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("{}", panic_summary(info.payload(), info.location()));
         restore();
         previous(info);
     }));
@@ -190,6 +208,8 @@ mod tests {
     use super::*;
     use crate::audio::{DeviceInfo, MicController};
     use crate::error::Result as CoreResult;
+    use std::any::Any;
+    use std::panic::Location;
     use std::sync::{Arc, Mutex};
 
     /// Fake microphone: records mute calls and can be told to fail (plan §10).
@@ -490,5 +510,34 @@ mod tests {
         std::panic::set_hook(previous);
 
         assert_eq!(*calls.lock().unwrap(), vec!["restore"]);
+    }
+
+    #[test]
+    fn panic_summaries_use_a_string_payload() {
+        // `&"boom"`, not `"boom"`: unsized `str` cannot cast to the trait
+        // object (rustc's own fix); the payload is `&str` either way.
+        let text: &(dyn Any + Send) = &"boom";
+        assert_eq!(panic_summary(text, None), "panic: boom");
+        let owned: &(dyn Any + Send) = &String::from("boom");
+        assert_eq!(panic_summary(owned, None), "panic: boom");
+    }
+
+    #[test]
+    fn panic_summaries_name_a_location_when_there_is_one() {
+        fn here() -> &'static Location<'static> {
+            Location::caller()
+        }
+        let message = panic_summary(&"boom", Some(here()));
+        assert!(message.starts_with("panic at "), "{message}");
+        assert!(message.contains("failsafe.rs"), "{message}");
+    }
+
+    #[test]
+    fn panic_summaries_tolerate_a_non_string_payload() {
+        let other: &(dyn Any + Send) = &5u8;
+        assert_eq!(
+            panic_summary(other, None),
+            "panic: non-string panic payload"
+        );
     }
 }

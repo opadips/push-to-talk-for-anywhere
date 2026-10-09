@@ -257,6 +257,7 @@ bound and Saved.
 - [ ] **DIAG-1 Startup line** — after launch the log (%LOCALAPPDATA%\ptt-tool\logs\ptt.log) contains "Windows LowLevelHooksTimeout = …" (a value or "not set").
 - [ ] **DIAG-2 Quiet in normal use** — ordinary typing/mouse use (non-gaming) produces no new WARN lines; if any appear, they are findings — send the log lines verbatim.
 - [ ] **DIAG-3 Incident capture** — if input stalls again: note the exact time, keep the app running, then send the log tail (WARN lines) and check Windows Event Viewer → Windows Logs → Application for "Application Error" (Event 1000) around that time.
+- [ ] **DIAG-4 Panic visibility** — a forced panic (see M3) also writes a "panic at …" line into ptt.log.
 
 ## Known limitations (confirm and record, plan §7)
 
