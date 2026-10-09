@@ -35,4 +35,6 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     # session lock/unlock notifications (hook re-install, plan §7)
     "Win32_System_RemoteDesktop",
+    # GetTickCount — the shared tick source for input-stall diagnostics
+    "Win32_System_SystemInformation",
 ] }
