@@ -3,7 +3,6 @@
 Everything here is explicitly **not built** in v1 — see IMPLEMENTATION_PLAN.md §1.
 Add to this list instead of growing the v1 scope.
 
-- Toggle mode (press once to talk)
 - Key combinations with modifiers
 - Per-application profiles
 - Noise suppression

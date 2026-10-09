@@ -200,6 +200,42 @@ exists at all.
       talking, the game never loses input or focus, and performance is
       unchanged in practice.
 
+### Toggle key (press once to talk) — TG-1…TG-9
+
+Set it up in settings → **Hotkey**: press **Change**, then press a key or
+mouse button (the same capture as the PTT binding, no on-screen keyboard
+for it); **Clear** removes it. An unbound toggle reads **"Not set"** — the
+default. TG-2 onwards assume a toggle key is bound and Saved.
+
+- [ ] **TG-1 Fresh config** — on a fresh `config.toml` the toggle row
+      reads "Not set" (nothing bound), and the app behaves exactly as
+      before: only the PTT key opens the mic.
+- [ ] **TG-2 Flip open / closed** — pick a toggle key, **Save**, press it
+      once: the mic opens with the start cue and the app shows Talking
+      (tray icon, settings chip, overlay dot). Press it again: after the
+      release delay the mic mutes, with the stop cue.
+- [ ] **TG-3 Live apply** — change the toggle binding and **Save**: it
+      applies without restarting — hold the PTT key right after saving and
+      there is no dead window (both keys respond immediately).
+- [ ] **TG-4 PTT inert while latched** — while the toggle has the mic
+      open, holding and releasing the PTT key does nothing: the mic stays
+      open, no chatter, no extra start/stop cues.
+- [ ] **TG-5 Disable / Enable** — while latched, tray **Disable** → state
+      Disabled and the mic is restored just as today (the latch is
+      cleared); press the toggle key to re-enable — the app goes straight
+      back into the latch (mic open, Talking).
+- [ ] **TG-6 Clear** — **Clear** the toggle key, **Save**: the row reads
+      "Not set" again and the key is inert (pressing it does nothing).
+- [ ] **TG-7 Swallow** — "Also block the toggle key from other
+      applications" is per-key: with it on, the toggle key does nothing in
+      other apps (Caps Lock does not toggle); with it off, the key passes
+      through to them.
+- [ ] **TG-8 Auto-repeat** — hold the toggle key down: auto-repeat flips
+      the mic exactly once (hook latch + 100 ms engine debounce), and
+      releasing it does nothing — no flip on release.
+- [ ] **TG-9 Sounds off** — untick "Play the talk / release sounds" +
+      Save: toggling is silent but still flips the mic open/closed.
+
 ## Known limitations (confirm and record, plan §7)
 
 - [ ] Elevated (admin) window focused: hotkey does **not** fire (UIPI) — as documented.

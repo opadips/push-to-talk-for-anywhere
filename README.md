@@ -35,6 +35,8 @@ stream — the mic opens when you press and closes when you let go.
   from getting cut off (default 200 ms, adjustable).
 - **Your key, your call.** Any keyboard key or mouse button, including side
   buttons. Optionally swallow it so it never reaches other apps.
+- **Press once to talk.** An optional toggle key in settings latches the mic
+  open — press it again to go back to muted.
 - **You can hear it.** Optional start/stop sound cues with a volume slider, so
   you always know when you're live.
 - **Leaves things as it found them.** Mute state is handed back on quit.
