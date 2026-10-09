@@ -37,6 +37,10 @@ pub struct Config {
     /// `[overlay]` — the on-screen talk-state badge (overlay design spec).
     #[serde(default)]
     pub overlay: OverlayConfig,
+    /// `[toggle]` — the optional second key that latches talk on/off.
+    /// Unbound unless the user opts in.
+    #[serde(default)]
+    pub toggle: ToggleConfig,
 }
 
 /// `[binding]` in `config.toml` (plan §8). The plain field types mirror the
@@ -45,6 +49,22 @@ pub struct Config {
 #[serde(default)]
 pub struct BindingConfig {
     /// `"key"` or `"mouse"`.
+    pub kind: String,
+    pub vk: u16,
+    pub scan: u16,
+    /// `""` unless `kind = "mouse"`.
+    pub mouse_button: String,
+    pub swallow: bool,
+}
+
+/// `[toggle]` in `config.toml` — the optional second binding that toggles
+/// talk on/off instead of push-to-talk. Same shape as [`BindingConfig`],
+/// but its neutral state is **unbound** (`kind = ""`): a config without a
+/// `[toggle]` section behaves exactly like before the feature existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToggleConfig {
+    /// `"key"`, `"mouse"` or `""` (unbound).
     pub kind: String,
     pub vk: u16,
     pub scan: u16,
@@ -119,6 +139,7 @@ impl Default for Config {
             sounds: SoundsConfig::default(),
             app: AppConfig::default(),
             overlay: OverlayConfig::default(),
+            toggle: ToggleConfig::default(),
         }
     }
 }
@@ -129,6 +150,18 @@ impl Default for BindingConfig {
             kind: "key".to_string(),
             vk: DEFAULT_VK,
             scan: DEFAULT_SCAN,
+            mouse_button: String::new(),
+            swallow: true,
+        }
+    }
+}
+
+impl Default for ToggleConfig {
+    fn default() -> Self {
+        Self {
+            kind: String::new(),
+            vk: 0,
+            scan: 0,
             mouse_button: String::new(),
             swallow: true,
         }
@@ -402,6 +435,29 @@ impl Config {
             }
         }
 
+        match self.toggle.kind.as_str() {
+            "" => {}
+            "key" if self.toggle.vk == 0 => {
+                messages.push("toggle kind \"key\" with vk 0; unbinding the toggle".into());
+                self.toggle = ToggleConfig::default();
+            }
+            "key" => {}
+            "mouse" if MouseButton::from_name(&self.toggle.mouse_button).is_err() => {
+                messages.push(format!(
+                    "toggle mouse_button {:?} is unknown; unbinding the toggle",
+                    self.toggle.mouse_button
+                ));
+                self.toggle = ToggleConfig::default();
+            }
+            "mouse" => {}
+            other => {
+                messages.push(format!(
+                    "toggle kind {other:?} is unknown; unbinding the toggle"
+                ));
+                self.toggle = ToggleConfig::default();
+            }
+        }
+
         messages
     }
 
@@ -433,6 +489,45 @@ impl Config {
             }
         }
         self.binding.swallow = swallow;
+    }
+
+    /// The optional toggle input this config asks for, or `None` while the
+    /// toggle is unbound (its neutral state).
+    pub fn toggle_binding(&self) -> Option<Binding> {
+        match self.toggle.kind.as_str() {
+            "key" if self.toggle.vk != 0 => Some(Binding::Key {
+                vk: self.toggle.vk,
+                scan: self.toggle.scan,
+            }),
+            "mouse" => MouseButton::from_name(&self.toggle.mouse_button)
+                .ok()
+                .map(Binding::Mouse),
+            _ => None,
+        }
+    }
+
+    /// Store the optional toggle the way the file represents it — `None`
+    /// clears it back to the unbound default.
+    pub fn set_toggle_binding(&mut self, binding: Option<&Binding>, swallow: bool) {
+        match binding {
+            None => {
+                self.toggle.kind.clear();
+                self.toggle.vk = 0;
+                self.toggle.scan = 0;
+                self.toggle.mouse_button.clear();
+            }
+            Some(Binding::Key { vk, scan }) => {
+                self.toggle.kind = "key".to_string();
+                self.toggle.vk = *vk;
+                self.toggle.scan = *scan;
+                self.toggle.mouse_button.clear();
+            }
+            Some(Binding::Mouse(button)) => {
+                self.toggle.kind = "mouse".to_string();
+                self.toggle.mouse_button = button.name().to_string();
+            }
+        }
+        self.toggle.swallow = swallow;
     }
 }
 
@@ -669,6 +764,90 @@ start_hidden = false
         assert_eq!(cfg.binding.scan, 0x1e);
         assert_eq!(cfg.binding.mouse_button, "");
         assert!(cfg.binding.swallow);
+    }
+
+    // --- toggle ----------------------------------------------------------
+
+    #[test]
+    fn toggle_is_unbound_by_default() {
+        let cfg = Config::default();
+        assert_eq!(cfg.toggle.kind, "");
+        assert_eq!(cfg.toggle_binding(), None);
+    }
+
+    #[test]
+    fn the_toggle_binding_round_trips_through_the_file() {
+        let path = scratch("toggle-roundtrip.toml");
+        let mut cfg = Config::default();
+        cfg.set_toggle_binding(Some(&Binding::Mouse(MouseButton::X2)), false);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert_eq!(report.source, LoadSource::File);
+        assert_eq!(
+            loaded.toggle_binding(),
+            Some(Binding::Mouse(MouseButton::X2))
+        );
+        assert!(!loaded.toggle.swallow);
+    }
+
+    #[test]
+    fn an_invalid_toggle_falls_back_to_unbound_with_a_message() {
+        let invalid = [
+            ToggleConfig {
+                kind: "banana".into(),
+                ..ToggleConfig::default()
+            },
+            ToggleConfig {
+                kind: "mouse".into(),
+                mouse_button: "nope".into(),
+                ..ToggleConfig::default()
+            },
+            ToggleConfig {
+                kind: "key".into(),
+                vk: 0,
+                ..ToggleConfig::default()
+            },
+        ];
+
+        for toggle in invalid {
+            let mut cfg = Config {
+                toggle: toggle.clone(),
+                ..Config::default()
+            };
+
+            let messages = cfg.validate();
+
+            assert!(
+                messages.iter().any(|m| m.contains("toggle")),
+                "{toggle:?}: {messages:?}"
+            );
+            assert_eq!(cfg.toggle.kind, "", "{toggle:?} falls back to unbound");
+            assert_eq!(cfg.toggle_binding(), None);
+        }
+    }
+
+    #[test]
+    fn a_config_without_a_toggle_section_loads_as_unbound() {
+        let path = scratch("no-toggle.toml");
+        std::fs::write(
+            &path,
+            r##"version = 1
+enabled = true
+
+[binding]
+kind = "mouse"
+mouse_button = "x2"
+"##,
+        )
+        .unwrap();
+
+        let (cfg, report) = Config::load(&path);
+
+        assert_eq!(report.source, LoadSource::File);
+        assert_eq!(cfg.toggle, ToggleConfig::default());
+        assert_eq!(cfg.toggle_binding(), None);
     }
 
     // --- overlay ---------------------------------------------------------
