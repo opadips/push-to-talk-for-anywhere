@@ -14,14 +14,17 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{
+    GetCurrentThreadId, GetSystemTimes, GetThreadTimes, OpenThread,
+    THREAD_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -351,11 +354,22 @@ unsafe fn message_loop() {
 /// wake it immediately instead of waiting out the timeout. Log-only.
 fn watchdog(stop_rx: Receiver<()>) {
     let mut watchdog = diagnostics::Watchdog::new(diagnostics::tick_ms());
+    // Wait-state probe (spec §4): the previous CPU/system reading, so a
+    // stall can be told apart from a spin or a starvation by the delta
+    // across it. Seeded once here — the hook thread id is stored before
+    // this thread spawns — so even a stall reported on the very first check
+    // has a baseline; then taken one watchdog tick apart, a window that
+    // sits inside the stall, since a stall is >5 s old when reported.
+    let mut previous: Option<WaitState> = sample_wait_state();
     loop {
         match stop_rx.recv_timeout(std::time::Duration::from_secs(2)) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
         }
+        // Read before checking: both this sample and the last predate the
+        // finding's report, so the window is inside the stall. Watchdog
+        // thread only — never a hook callback.
+        let current = sample_wait_state();
         for finding in watchdog.check(&diagnostics::snapshot(system_last_input_tick())) {
             let message = finding.message();
             // The tracing line can die with the process (non-blocking
@@ -363,7 +377,28 @@ fn watchdog(stop_rx: Receiver<()>) {
             // thread only — never a hook callback.
             diagnostics::record_finding(&message);
             tracing::warn!("{message}");
+
+            // Follow a hook-thread stall with what the thread was doing:
+            // executing, blocked, or starved — each points at a different
+            // fix (spec §4). Both readings must exist or the probe stays
+            // quiet rather than guess.
+            if matches!(finding, diagnostics::Finding::HookThreadStalled { .. }) {
+                if let (Some(before), Some(after)) = (previous, current) {
+                    let window = after.tick.wrapping_sub(before.tick) as u64 * 10_000;
+                    if let Some(cause) = diagnostics::StallCause::from_deltas(
+                        after.hook_cpu.saturating_sub(before.hook_cpu),
+                        after.system_idle.saturating_sub(before.system_idle),
+                        after.system_total.saturating_sub(before.system_total),
+                        window,
+                    ) {
+                        let cause_message = cause.message();
+                        diagnostics::record_finding(&cause_message);
+                        tracing::warn!("{cause_message}");
+                    }
+                }
+            }
         }
+        previous = current;
     }
 }
 
@@ -381,6 +416,74 @@ fn system_last_input_tick() -> u32 {
     } else {
         0
     }
+}
+
+/// One wait-state probe reading (spec §4): cumulative CPU and idle counts
+/// in 100-ns units, stamped with the tick it was taken at.
+#[derive(Clone, Copy)]
+struct WaitState {
+    /// `GetTickCount` when the reading was taken.
+    tick: u32,
+    /// Hook thread kernel + user time (100-ns units).
+    hook_cpu: u64,
+    /// Machine-wide idle time (100-ns units).
+    system_idle: u64,
+    /// Machine-wide kernel + user time, which on Windows already includes
+    /// idle — the denominator for the machine's idle share (100-ns units).
+    system_total: u64,
+}
+
+/// Read the hook thread's CPU consumption and the machine's idle/busy split
+/// for the wait-state probe (spec §4). `None` when there is no hook thread
+/// yet or Windows will not say — the probe then logs nothing rather than
+/// guess. Watchdog thread only: `OpenThread` takes a query-only handle that
+/// is closed before returning, and nothing here touches the input path.
+fn sample_wait_state() -> Option<WaitState> {
+    let thread_id = HOOK_THREAD.load(Ordering::SeqCst);
+    if thread_id == 0 {
+        return None;
+    }
+    // SAFETY: `OpenThread` needs only query access for `GetThreadTimes`;
+    // the handle is closed on every path below, and the four out-times are
+    // valid, writable `FILETIME` locals that outlive the call.
+    let handle = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, thread_id) }.ok()?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let thread_times =
+        unsafe { GetThreadTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    // SAFETY: the handle came from the `OpenThread` above and is closed
+    // exactly once here.
+    let _ = unsafe { CloseHandle(handle) };
+    thread_times.ok()?;
+
+    let mut idle = FILETIME::default();
+    let mut system_kernel = FILETIME::default();
+    let mut system_user = FILETIME::default();
+    // SAFETY: three valid, writable `FILETIME` locals; `GetSystemTimes`
+    // fills each it is given and touches nothing else.
+    unsafe {
+        GetSystemTimes(
+            Some(&mut idle),
+            Some(&mut system_kernel),
+            Some(&mut system_user),
+        )
+    }
+    .ok()?;
+
+    Some(WaitState {
+        tick: diagnostics::tick_ms(),
+        hook_cpu: filetime_100ns(kernel) + filetime_100ns(user),
+        system_idle: filetime_100ns(idle),
+        system_total: filetime_100ns(system_kernel) + filetime_100ns(system_user),
+    })
+}
+
+/// A `FILETIME` is a count of 100-ns intervals split across two 32-bit
+/// halves; recombine without losing the high word.
+fn filetime_100ns(value: FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
 }
 
 /// Log the effective `LowLevelHooksTimeout` once per hook-thread start

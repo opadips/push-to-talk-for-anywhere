@@ -3,6 +3,11 @@
 //! session worker stalls. Every decision is a pure function of tick counts,
 //! so all the rules below are unit-tested without Windows (spec §4).
 //!
+//! The wait-state probe adds one more decision — what a *stalled* hook
+//! thread was actually doing (executing, blocked, or starved). It too is a
+//! pure function, of CPU-time deltas rather than ticks, so it is tested the
+//! same way; only the Win32 reading of those times lives in the glue.
+//!
 //! The rules the tests protect: every comparison is a `wrapping_sub` (the
 //! tick source wraps every ~49.7 days), each finding kind is rate-limited to
 //! one report per [`REPORT_GAP_MS`], and a condition that already exists
@@ -348,6 +353,113 @@ pub fn record_finding(message: &str) {
     }
 }
 
+/// At or above this share of one CPU, a stalled hook thread is called
+/// *executing* rather than *waiting*: it burned a core instead of pumping.
+pub const SPINNING_CPU_PCT: u32 = 50;
+
+/// At or below this share of the machine's CPU left idle, a waiting stall
+/// is called *starved* (no capacity to schedule us); above it the machine
+/// had room to run us, so the wait was *blocked* on something else. The
+/// pair of thresholds is deliberately a heuristic — the log line carries
+/// both raw percentages so the numbers can be re-judged without a rebuild.
+pub const STARVED_IDLE_PCT: u32 = 10;
+
+/// What the wait-state probe concluded about a stalled hook thread (spec
+/// §4). Three verdicts, three different fixes: a higher thread priority
+/// only helps the starved case and does nothing for the other two, which
+/// is the whole reason the probe reads CPU before anyone changes priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallCause {
+    /// It burned CPU throughout the stall — our code or a driver is
+    /// executing, not waiting on anything.
+    Spinning {
+        /// Share of one CPU the hook thread used over the window.
+        cpu_pct: u32,
+    },
+    /// It used almost no CPU while the machine had CPU to spare: stuck
+    /// inside a kernel call, not starved of time to run.
+    Blocked {
+        /// Share of one CPU the hook thread used over the window.
+        cpu_pct: u32,
+        /// Share of the machine's CPU that was idle over the window.
+        idle_pct: u32,
+    },
+    /// It used almost no CPU while the machine was nearly saturated: CPU
+    /// starvation — the case a higher thread priority would address.
+    Starved {
+        /// Share of one CPU the hook thread used over the window.
+        cpu_pct: u32,
+        /// Share of the machine's CPU that was idle over the window.
+        idle_pct: u32,
+    },
+}
+
+impl StallCause {
+    /// The pure verdict from the two sampled percentages (spec §4): first
+    /// split executing from waiting, then a wait from a starvation.
+    pub fn classify(cpu_pct: u32, idle_pct: u32) -> Self {
+        if cpu_pct >= SPINNING_CPU_PCT {
+            StallCause::Spinning { cpu_pct }
+        } else if idle_pct <= STARVED_IDLE_PCT {
+            StallCause::Starved { cpu_pct, idle_pct }
+        } else {
+            StallCause::Blocked { cpu_pct, idle_pct }
+        }
+    }
+
+    /// The verdict straight from raw 100-ns deltas, so the percentage
+    /// arithmetic and the thresholds are tested as one unit: `hook_cpu` is
+    /// the thread's kernel + user time, `system_idle` the machine's idle
+    /// time, `system_total` its whole capacity, and `window` the
+    /// wall-clock span — all four over the same window. A `0` window or a
+    /// machine that reported no totals cannot say anything, so neither
+    /// yields a verdict.
+    pub fn from_deltas(
+        hook_cpu: u64,
+        system_idle: u64,
+        system_total: u64,
+        window: u64,
+    ) -> Option<Self> {
+        if window == 0 || system_total == 0 {
+            return None;
+        }
+        // `system_total` (GetSystemTimes' kernel + user) already contains
+        // the idle time, so idle / total is the machine's idle share.
+        Some(StallCause::classify(
+            percent(hook_cpu, window),
+            percent(system_idle, system_total),
+        ))
+    }
+
+    /// The spec §4 line: the verdict *and* every number behind it, so the
+    /// evidence stands even where the thresholds are later re-judged.
+    pub fn message(&self) -> String {
+        match self {
+            StallCause::Spinning { cpu_pct } => format!(
+                "wait-state probe: the hook thread used {cpu_pct}% of a CPU while stalled — \
+                 it is executing, not waiting; raising thread priority would not help"
+            ),
+            StallCause::Blocked { cpu_pct, idle_pct } => format!(
+                "wait-state probe: the hook thread used {cpu_pct}% of a CPU while {idle_pct}% of \
+                 the machine was idle — blocked inside a call, not starved"
+            ),
+            StallCause::Starved { cpu_pct, idle_pct } => format!(
+                "wait-state probe: the hook thread used {cpu_pct}% of a CPU while the machine was \
+                 only {idle_pct}% idle — starved of CPU time; a higher thread priority would help"
+            ),
+        }
+    }
+}
+
+/// `part` as a percentage of `whole` (both 100-ns counts), clamped to 100;
+/// a `0` whole reads as `0` rather than dividing by zero.
+fn percent(part: u64, whole: u64) -> u32 {
+    if whole == 0 {
+        return 0;
+    }
+    (part.saturating_mul(100) / whole).min(100) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,5 +773,118 @@ mod tests {
             "{hooks_silent}"
         );
         assert!(hooks_silent.contains("90 s"), "{hooks_silent}");
+    }
+
+    #[test]
+    fn stall_cause_splits_executing_from_waiting_first() {
+        // Burning a core throughout: executing, whatever the machine does.
+        assert_eq!(
+            StallCause::classify(50, 90),
+            StallCause::Spinning { cpu_pct: 50 },
+            "at the spinning bar even on an idle machine"
+        );
+        assert_eq!(
+            StallCause::classify(100, 0),
+            StallCause::Spinning { cpu_pct: 100 },
+            "a fully busy machine cannot make a spinning thread 'starved'"
+        );
+    }
+
+    #[test]
+    fn stall_cause_splits_starved_from_blocked_on_idle_cpu() {
+        assert_eq!(
+            StallCause::classify(0, 10),
+            StallCause::Starved {
+                cpu_pct: 0,
+                idle_pct: 10
+            },
+            "no CPU for us while the machine has none spare: starved"
+        );
+        assert_eq!(
+            StallCause::classify(0, 11),
+            StallCause::Blocked {
+                cpu_pct: 0,
+                idle_pct: 11
+            },
+            "no CPU for us while the machine had room: blocked, not starved"
+        );
+    }
+
+    #[test]
+    fn stall_cause_turns_raw_deltas_into_percentages() {
+        // 2 s window (20,000,000 × 100 ns); the hook thread burned 1 s of
+        // one core over it, and half the machine sat idle.
+        let verdict =
+            StallCause::from_deltas(10_000_000, 8 * 10_000_000, 16 * 10_000_000, 20_000_000)
+                .expect("a real window yields a verdict");
+        assert_eq!(
+            verdict,
+            StallCause::Spinning { cpu_pct: 50 },
+            "1 s of CPU in a 2 s window is exactly half a core"
+        );
+
+        // No hook-thread CPU at all, machine half idle: blocked.
+        let verdict = StallCause::from_deltas(0, 8 * 10_000_000, 16 * 10_000_000, 20_000_000)
+            .expect("a real window yields a verdict");
+        assert_eq!(
+            verdict,
+            StallCause::Blocked {
+                cpu_pct: 0,
+                idle_pct: 50
+            },
+            "half the machine idle is above the starvation bar"
+        );
+    }
+
+    #[test]
+    fn stall_cause_says_nothing_from_an_empty_window() {
+        assert_eq!(
+            StallCause::from_deltas(0, 0, 0, 0),
+            None,
+            "no elapsed window cannot yield a verdict"
+        );
+        assert_eq!(
+            StallCause::from_deltas(0, 0, 0, 20_000_000),
+            None,
+            "a machine that reported no totals cannot be judged either"
+        );
+    }
+
+    #[test]
+    fn stall_cause_clamps_a_cpu_share_to_one_core() {
+        // A thread recorded as using more than the window holds (clock
+        // skew between GetThreadTimes and the tick) reads as one core, not
+        // 200%.
+        let verdict = StallCause::from_deltas(40_000_000, 0, 16 * 10_000_000, 20_000_000)
+            .expect("a real window yields a verdict");
+        assert_eq!(
+            verdict,
+            StallCause::Spinning { cpu_pct: 100 },
+            "the share is capped at a single core"
+        );
+    }
+
+    #[test]
+    fn stall_cause_messages_name_the_fix_each_verdict_justifies() {
+        let spinning = StallCause::Spinning { cpu_pct: 99 }.message();
+        assert!(spinning.contains("executing"), "{spinning}");
+        assert!(spinning.contains("would not help"), "{spinning}");
+        assert!(spinning.contains("99%"), "{spinning}");
+
+        let blocked = StallCause::Blocked {
+            cpu_pct: 0,
+            idle_pct: 42,
+        }
+        .message();
+        assert!(blocked.contains("blocked inside a call"), "{blocked}");
+        assert!(blocked.contains("42%"), "{blocked}");
+
+        let starved = StallCause::Starved {
+            cpu_pct: 1,
+            idle_pct: 3,
+        }
+        .message();
+        assert!(starved.contains("starved of CPU time"), "{starved}");
+        assert!(starved.contains("priority would help"), "{starved}");
     }
 }
