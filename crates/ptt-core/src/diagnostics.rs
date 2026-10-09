@@ -8,6 +8,7 @@
 //! one report per [`REPORT_GAP_MS`], and a condition that already exists
 //! when the [`Watchdog`] is created reports on the very first check.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Wait this long for the hook to run and the stall warning may fire.
@@ -297,6 +298,56 @@ pub fn maybe_stall_warning(device: &str, wait_ms: u32, exec_ms: u64) -> Option<S
     warning
 }
 
+/// Durable copy of every watchdog finding: `%LOCALAPPDATA%\ptt-tool\logs\`
+/// `findings.log` (same directory the rotating `ptt.log` lives in, reached
+/// the way [`crate::failsafe`] reaches `state.json`).
+///
+/// Why this file exists: the `tracing` appender is non-blocking and the
+/// `WorkerGuard` is never dropped on a hard kill, so a wedged process (or an
+/// `End Task`) discards every line still in the buffer — exactly the moment a
+/// finding matters most. This path is appended to *synchronously* on the
+/// watchdog thread, which never touches the input pipeline, so the record
+/// survives the process it describes.
+pub fn findings_path() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ptt-tool")
+        .join("logs")
+        .join("findings.log")
+}
+
+/// Append one finding line to [`findings_path`] and flush it to disk before
+/// returning, so the line cannot be lost to a later kill (spec §4's evidence
+/// trail). Callers are the watchdog thread only — never a hook callback,
+/// which must not block on I/O. A failure here is silent by design: the
+/// finding has already gone to `tracing`, and diagnostics must never take
+/// the app down.
+///
+/// The line is `{epoch_ms} {message}`: epoch milliseconds line up with the
+/// `ptt.log` timestamps (both UTC) and survive `GetTickCount`'s ~49.7-day
+/// wrap, which a boot-relative tick would not.
+pub fn record_finding(message: &str) {
+    use std::io::Write;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0);
+    let path = findings_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{now} {message}");
+        let _ = file.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +405,18 @@ mod tests {
     fn most_recent_callback_picks_the_newer_tick() {
         assert_eq!(most_recent(1_000, 900, 950), 950, "the newer beat wins");
         assert_eq!(most_recent(1_000, 950, 950), 950, "a tie picks b");
+    }
+
+    #[test]
+    fn findings_path_lives_in_the_logs_directory() {
+        // Path shape only — the durable write itself runs on the watchdog
+        // thread against the real path and is not exercised under parallel
+        // tests (same reasoning as the glue's other untested statics).
+        assert!(findings_path().ends_with(
+            std::path::Path::new("ptt-tool")
+                .join("logs")
+                .join("findings.log")
+        ));
     }
 
     #[test]

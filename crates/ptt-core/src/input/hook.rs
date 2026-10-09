@@ -357,7 +357,12 @@ fn watchdog(stop_rx: Receiver<()>) {
             Err(RecvTimeoutError::Timeout) => {}
         }
         for finding in watchdog.check(&diagnostics::snapshot(system_last_input_tick())) {
-            tracing::warn!("{}", finding.message());
+            let message = finding.message();
+            // The tracing line can die with the process (non-blocking
+            // appender + hard kill); the synchronous copy cannot. Watchdog
+            // thread only — never a hook callback.
+            diagnostics::record_finding(&message);
+            tracing::warn!("{message}");
         }
     }
 }
