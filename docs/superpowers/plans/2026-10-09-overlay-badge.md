@@ -43,7 +43,7 @@ Failure modes the spec implies but no single test proves — each owned by the t
 **Interfaces:**
 - Produces: `pub struct OverlayConfig { pub enabled: bool, pub mode: String, pub position: String, pub distance: u32 }` with `#[serde(default)]`; `Config.overlay: OverlayConfig`; `Default` = spec defaults. Later tasks read `config.overlay` (Rust) and `settings.overlay` (JSON via `get_settings`/`save_settings`).
 
-- [ ] **Step 1: Write the failing tests** (in `config.rs` test module)
+- [x] **Step 1: Write the failing tests** (in `config.rs` test module)
 
 ```rust
 #[test]
@@ -82,19 +82,19 @@ fn overlay_validate_falls_back_and_clamps() {
 }
 ```
 
-- [ ] **Step 2: Run tests, verify they fail**
+- [x] **Step 2: Run tests, verify they fail**
 
 Run: `cargo test -p ptt-core config::tests::overlay` — Expected: FAIL (no `OverlayConfig`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `OverlayConfig` with `#[serde(default)]`, `Serialize/Deserialize/Clone/Debug/PartialEq/Eq`, `Default` per spec; add `#[serde(default)] pub overlay: OverlayConfig` to `Config` + its `Default`; extend `validate()` to normalize `mode` ∈ {`talk-only`,`always`}, `position` ∈ {`top-left`,`top-center`,`top-right`,`bottom-left`,`bottom-center`,`bottom-right`}, clamp `distance` 0..=200 — each with an `info!`-style warning message pushed to the returned `Vec<String>` (mirror the existing volume clamp).
 
-- [ ] **Step 4: Run tests, verify they pass**
+- [x] **Step 4: Run tests, verify they pass**
 
 Run: `cargo test -p ptt-core` — Expected: all pass (existing + 3 new).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/ptt-core/src/config.rs

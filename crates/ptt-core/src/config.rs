@@ -16,6 +16,9 @@ pub const CURRENT_VERSION: u32 = 1;
 /// Plan §8: `release_delay_ms` is validated to 0–2000 ms.
 pub const MAX_RELEASE_DELAY_MS: u64 = 2000;
 
+/// Overlay distance from the screen edges is validated to 0–200 px.
+pub const MAX_OVERLAY_DISTANCE: u32 = 200;
+
 /// Plan §8 default binding: Caps Lock.
 const DEFAULT_VK: u16 = 0x14;
 const DEFAULT_SCAN: u16 = 0x3A;
@@ -31,6 +34,9 @@ pub struct Config {
     pub audio: AudioConfig,
     pub sounds: SoundsConfig,
     pub app: AppConfig,
+    /// `[overlay]` — the on-screen talk-state badge (overlay design spec).
+    #[serde(default)]
+    pub overlay: OverlayConfig,
 }
 
 /// `[binding]` in `config.toml` (plan §8). The plain field types mirror the
@@ -87,6 +93,22 @@ pub struct AppConfig {
     pub start_hidden: bool,
 }
 
+/// `[overlay]` in `config.toml` — the on-screen pulsing-dot badge. Off by
+/// default so the plan §12 idle budget is untouched unless asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlayConfig {
+    /// Master switch: no overlay window exists at all when false.
+    pub enabled: bool,
+    /// `"talk-only"` (badge only while talking) or `"always"` (dim while
+    /// muted, bright while talking).
+    pub mode: String,
+    /// One of `top|bottom` × `left|center|right`, e.g. `"bottom-right"`.
+    pub position: String,
+    /// Distance from the screen edges in pixels (0–200).
+    pub distance: u32,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -96,6 +118,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             sounds: SoundsConfig::default(),
             app: AppConfig::default(),
+            overlay: OverlayConfig::default(),
         }
     }
 }
@@ -136,6 +159,17 @@ impl Default for AppConfig {
         Self {
             start_with_windows: false,
             start_hidden: true,
+        }
+    }
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "talk-only".to_string(),
+            position: "bottom-right".to_string(),
+            distance: 24,
         }
     }
 }
@@ -312,6 +346,38 @@ impl Config {
                 self.sounds.volume
             ));
             self.sounds.volume = clamped;
+        }
+
+        if !matches!(self.overlay.mode.as_str(), "talk-only" | "always") {
+            messages.push(format!(
+                "overlay mode {:?} is unknown; using \"talk-only\"",
+                self.overlay.mode
+            ));
+            self.overlay.mode = "talk-only".to_string();
+        }
+
+        if !matches!(
+            self.overlay.position.as_str(),
+            "top-left"
+                | "top-center"
+                | "top-right"
+                | "bottom-left"
+                | "bottom-center"
+                | "bottom-right"
+        ) {
+            messages.push(format!(
+                "overlay position {:?} is unknown; using \"bottom-right\"",
+                self.overlay.position
+            ));
+            self.overlay.position = "bottom-right".to_string();
+        }
+
+        if self.overlay.distance > MAX_OVERLAY_DISTANCE {
+            messages.push(format!(
+                "overlay distance {} is out of range; using {MAX_OVERLAY_DISTANCE}",
+                self.overlay.distance
+            ));
+            self.overlay.distance = MAX_OVERLAY_DISTANCE;
         }
 
         match self.binding.kind.as_str() {
@@ -603,6 +669,57 @@ start_hidden = false
         assert_eq!(cfg.binding.scan, 0x1e);
         assert_eq!(cfg.binding.mouse_button, "");
         assert!(cfg.binding.swallow);
+    }
+
+    // --- overlay ---------------------------------------------------------
+
+    #[test]
+    fn overlay_defaults_match_the_spec() {
+        let overlay = OverlayConfig::default();
+        assert!(!overlay.enabled, "opt-in: off by default");
+        assert_eq!(overlay.mode, "talk-only");
+        assert_eq!(overlay.position, "bottom-right");
+        assert_eq!(overlay.distance, 24);
+    }
+
+    #[test]
+    fn overlay_section_is_optional_and_round_trips() {
+        // A config file written before the feature: no [overlay] at all.
+        let legacy = "version = 1\nenabled = true\n";
+        let parsed: Config = toml::from_str(legacy).expect("legacy config parses");
+        assert_eq!(parsed.overlay, OverlayConfig::default());
+
+        let overlay = OverlayConfig {
+            enabled: true,
+            mode: "always".into(),
+            position: "top-left".into(),
+            distance: 80,
+        };
+        let config = Config {
+            overlay: overlay.clone(),
+            ..Config::default()
+        };
+        let text = toml::to_string(&config).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.overlay, overlay);
+    }
+
+    #[test]
+    fn overlay_validate_falls_back_and_clamps() {
+        let mut config = Config {
+            overlay: OverlayConfig {
+                enabled: true,
+                mode: "sideways".into(),
+                position: "middle".into(),
+                distance: 9999,
+            },
+            ..Config::default()
+        };
+        let warnings = config.validate();
+        assert_eq!(config.overlay.mode, "talk-only");
+        assert_eq!(config.overlay.position, "bottom-right");
+        assert_eq!(config.overlay.distance, 200);
+        assert_eq!(warnings.len(), 3);
     }
 
     // --- resolve: file first, overrides on top (plan §8) ------------------
