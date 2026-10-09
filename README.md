@@ -1,5 +1,7 @@
 # Push-to-Talk for Anywhere
 
+“Windows 10/11” 
+
 A small tray app that keeps your microphone muted and only unmutes it while you
 hold a key (or a mouse button). Whatever you're in — a browser tab, a game, a
 stream — the mic opens when you press and closes when you let go.
