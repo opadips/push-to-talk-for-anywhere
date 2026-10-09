@@ -192,8 +192,8 @@ fn positions_place_the_badge_on_the_requested_edge() {
 
 ### Task 6: Full gate, push, CI, handoff
 
-- [ ] **Step 1: Full gate** — every command in Global Constraints — Expected: all clean.
-- [ ] **Step 2: Ledger** — append the overlay design/plan/decisions to `.superpowers/sdd/IMPLEMENTATION_PLAN/progress.md` (deviation: M6 stretch pulled forward, spec path).
+- [x] **Step 1: Full gate** — every command in Global Constraints — Expected: all clean.
+- [x] **Step 2: Ledger** — append the overlay design/plan/decisions to `.superpowers/sdd/IMPLEMENTATION_PLAN/progress.md` (deviation: M6 stretch pulled forward, spec path).
 - [ ] **Step 3: Push + CI** — `git push origin main`; watch the CI run to green.
 - [ ] **Step 4: Hand off** — tell the partner to `git pull`, rebuild both steps (UI is embedded), and run the Overlay checklist M-1..M-7; focus/click-through (M-3/M-4) are the ones to scrutinize, with the `WS_EX_NOACTIVATE` fallback ready if M-4 fails.
 
