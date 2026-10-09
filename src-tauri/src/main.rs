@@ -9,6 +9,7 @@
 
 mod app;
 mod commands;
+mod overlay;
 mod tray;
 
 use tauri::Manager;

@@ -387,6 +387,11 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if !config.app.start_hidden {
         show_settings(app.handle());
     }
+
+    // The overlay badge follows `config.toml` from the first moment
+    // (overlay design spec); a no-op unless `[overlay] enabled = true`.
+    crate::overlay::sync_overlay(app.handle());
+
     Ok(())
 }
 

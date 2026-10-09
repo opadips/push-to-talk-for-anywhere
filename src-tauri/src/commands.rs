@@ -38,14 +38,20 @@ pub fn get_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, String
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: Config) -> Result<Config, String> {
     let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
         let outcome = app::apply_settings(&state, settings);
         app::remember(&state, &outcome);
         outcome
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if outcome.is_ok() {
+        // A save can change the overlay: it applies live, no restart
+        // (overlay design spec).
+        crate::overlay::sync_overlay(&app);
+    }
+    outcome
 }
 
 /// The settings window's own Enable/Disable (the tray menu has its path).

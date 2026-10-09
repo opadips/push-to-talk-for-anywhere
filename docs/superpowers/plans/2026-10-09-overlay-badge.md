@@ -114,7 +114,7 @@ git commit -m "feat: overlay config section with safe defaults"
 - Consumes: `Config.overlay` (Task 1), `app.state::<AppState>().config`.
 - Produces: `pub fn sync_overlay(app: &tauri::AppHandle)` — idempotent; destroys any `overlay` window, then recreates it iff `overlay.enabled`, positioned per config. Called by Task 2's own hooks in `save_settings`/`setup`; nothing else calls it.
 
-- [ ] **Step 1: Write the failing position-math tests**
+- [x] **Step 1: Write the failing position-math tests**
 
 ```rust
 #[test]
@@ -129,17 +129,17 @@ fn positions_place_the_badge_on_the_requested_edge() {
 }
 ```
 
-- [ ] **Step 2: Run, verify failure** — `cargo test -p ptt-tool overlay` — Expected: FAIL (missing fn).
+- [x] **Step 2: Run, verify failure** — `cargo test -p ptt-tool overlay` — Expected: FAIL (missing fn).
 
-- [ ] **Step 3: Implement `overlay.rs`**
+- [x] **Step 3: Implement `overlay.rs`**
 
 - `fn overlay_position(position: &str, distance: u32, screen_w: u32, screen_h: u32) -> (f64, f64)` — pure; window size constant `const OVERLAY_SIZE: f64 = 64.0`; x/y computed from the edge and `distance as f64`; center variants use `(screen_w - 64) / 2`.
 - `pub fn sync_overlay(app: &tauri::AppHandle)`: run via `app.run_on_main_thread` (called from a blocking command thread). Read `config.overlay`; if a window labeled `overlay` exists, `destroy()` it. If `enabled`, build a `WebviewWindowBuilder` with `WebviewUrl::App("overlay.html".into())`: `.transparent(true).decorations(false).shadow(false).always_on_top(true).skip_taskbar(true).focused(false).inner_size(64.0, 64.0)` then `.set_ignore_cursor_events(true)`; position from `app.primary_monitor()` (fallback: current window's monitor) via `overlay_position`. Log a warning and do nothing on any window-creation error (badge is cosmetic).
 - Hooks: in `save_settings` after `app::remember(...)` success, call `overlay::sync_overlay(&app)`; in `setup` after `show_settings(...)`, call it too. `main.rs`: `mod overlay;`.
 
-- [ ] **Step 4: Run tests + full Rust gate** — `cargo test` and both clippys — Expected: PASS/clean.
+- [x] **Step 4: Run tests + full Rust gate** — `cargo test` and both clippys — Expected: PASS/clean.
 
-- [ ] **Step 5: Commit** — `git add src-tauri && git commit -m "feat: overlay window lifecycle driven by config"`
+- [x] **Step 5: Commit** — `git add src-tauri && git commit -m "feat: overlay window lifecycle driven by config"`
 
 ### Task 3: The overlay page (ui/)
 
