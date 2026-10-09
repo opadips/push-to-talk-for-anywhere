@@ -1,0 +1,52 @@
+/* The badge window is a transparent 64x64 box: only the dot paints.
+   Keeping the document background fully transparent is what makes the
+   window read as "nothing but a dot" (spec: no white box, no shadow). */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Belt and braces: the window is click-through at the Win32 level. */
+  pointer-events: none;
+  user-select: none;
+}
+
+#dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  opacity: 0;
+  /* The talk-only fade-out: the class leaves, the dot breathes out over
+     300ms, and the page hides the window once the transition is done. */
+  transition: opacity 300ms ease;
+}
+
+/* Talking (and the release delay while the mic is still open): a bright
+   pulsing dot. */
+#dot.talking {
+  opacity: 1;
+  background: #ef4444;
+  box-shadow: 0 0 12px 4px rgb(239 68 68 / 0.7);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* "always" mode while muted: a dim static dot, no animation. */
+#dot.dim {
+  opacity: 1;
+  background: #6b7280;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.72);
+  }
+}

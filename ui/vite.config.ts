@@ -14,5 +14,13 @@ export default defineConfig({
     target: "esnext",
     minify: "es2021",
     sourcemap: Boolean(process.env.TAURI_DEBUG),
+    // Two pages ship in the bundle: the settings window and the overlay
+    // badge (overlay design spec).
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        overlay: "overlay.html",
+      },
+    },
   },
 });

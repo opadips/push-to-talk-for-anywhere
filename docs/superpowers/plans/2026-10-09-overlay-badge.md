@@ -152,13 +152,13 @@ fn positions_place_the_badge_on_the_requested_edge() {
 - Consumes: `status` event payload `{ state: "Disabled"|"Muted"|"Talking", ... }`; `invoke("get_settings")` → `Config` with `overlay.mode`.
 - Produces: the served page for Task 2's window (no code interface).
 
-- [ ] **Step 1: Multi-page build config** — add `build.rollupOptions.input = { main: "index.html", overlay: "overlay.html" }` (paths relative to `ui/`).
+- [x] **Step 1: Multi-page build config** — add `build.rollupOptions.input = { main: "index.html", overlay: "overlay.html" }` (paths relative to `ui/`).
 
-- [ ] **Step 2: Write the page** — `overlay.html`: minimal shell, `<div id="dot">`, links `overlay.css` + `overlay.ts` module. `overlay.css`: `html,body{background:transparent;margin:0;height:100%}`; `#dot` centered 20 px circle; classes `.talking` (red `#ef4444`, glow `box-shadow`, `animation: pulse 1.2s ease-in-out infinite`) and `.dim` (gray, no animation); `#dot{transition:opacity 300ms}` for the fade. `overlay.ts`: on load `invoke<Config>("get_settings")` for the mode; `invoke("get_status")` once for the initial state; `listen("status", ...)`; state machine: `Talking` → `show()` + `.talking`; `Muted` → always-mode: `show()` + `.dim`, talk-only: add fade class, then `setTimeout(350)` → `hide()`; `Disabled` → `hide()`. Use `getCurrentWindow()` from `@tauri-apps/api/window` and `listen` from `@tauri-apps/api/event` (same imports the settings app already uses).
+- [x] **Step 2: Write the page** — `overlay.html`: minimal shell, `<div id="dot">`, links `overlay.css` + `overlay.ts` module. `overlay.css`: `html,body{background:transparent;margin:0;height:100%}`; `#dot` centered 20 px circle; classes `.talking` (red `#ef4444`, glow `box-shadow`, `animation: pulse 1.2s ease-in-out infinite`) and `.dim` (gray, no animation); `#dot{transition:opacity 300ms}` for the fade. `overlay.ts`: on load `invoke<Config>("get_settings")` for the mode; `invoke("get_status")` once for the initial state; `listen("status", ...)`; state machine: `Talking` → `show()` + `.talking`; `Muted` → always-mode: `show()` + `.dim`, talk-only: add fade class, then `setTimeout(350)` → `hide()`; `Disabled` → `hide()`. Use `getCurrentWindow()` from `@tauri-apps/api/window` and `listen` from `@tauri-apps/api/event` (same imports the settings app already uses).
 
-- [ ] **Step 3: Build check** — `npm run build --prefix ui` — Expected: `dist/overlay.html` exists alongside `dist/index.html`; `cargo build` embeds both (verify asset map contains `/overlay.html` via `strings target/debug/ptt-tool | grep overlay`).
+- [x] **Step 3: Build check** — `npm run build --prefix ui` — Expected: `dist/overlay.html` exists alongside `dist/index.html`; `cargo build` embeds both (verify asset map contains `/overlay.html` via `strings target/debug/ptt-tool | grep overlay`).
 
-- [ ] **Step 4: Commit** — `git add ui && git commit -m "feat: overlay page with pulsing talk-state dot"`
+- [x] **Step 4: Commit** — `git add ui && git commit -m "feat: overlay page with pulsing talk-state dot"`
 
 ### Task 4: Settings UI — Overlay card
 
@@ -196,3 +196,19 @@ fn positions_place_the_badge_on_the_requested_edge() {
 - [ ] **Step 2: Ledger** — append the overlay design/plan/decisions to `.superpowers/sdd/IMPLEMENTATION_PLAN/progress.md` (deviation: M6 stretch pulled forward, spec path).
 - [ ] **Step 3: Push + CI** — `git push origin main`; watch the CI run to green.
 - [ ] **Step 4: Hand off** — tell the partner to `git pull`, rebuild both steps (UI is embedded), and run the Overlay checklist M-1..M-7; focus/click-through (M-3/M-4) are the ones to scrutinize, with the `WS_EX_NOACTIVATE` fallback ready if M-4 fails.
+
+## Execution notes (recorded during implementation)
+
+- **M-4 pre-registration (tao 0.37.1 source inspection):** windows are created with
+  `MARKER_DONT_FOCUS` when `focused(false)`, so the *creation* show uses
+  `SW_SHOWNOACTIVATE` — but tao **removes the marker right after creation**
+  (`window.rs:1415`), so a later `show()` (talk-only: every muted→talking
+  transition) diffs to `SW_SHOW`, which Win32 documents as activating.
+  `set_ignore_cursor_events(true)` only adds `WS_EX_TRANSPARENT|WS_EX_LAYERED`
+  (`window_state.rs:282`), **not** `WS_EX_NOACTIVATE`; `WS_EX_NOACTIVATE` comes
+  from `!FOCUSABLE`, which Tauri does not expose. Hypothesis for M-4: talk-only
+  mode may attempt activation on re-show. Contingency if M-4 fails: stop
+  hiding/showing the window (keep it alive and fade the dot to opacity 0 —
+  always-mode already never calls show() after creation), rather than the
+  planned `WS_EX_NOACTIVATE` patch, which MSDN indicates `SetWindowPos` (what
+  `SW_SHOW` uses) can override. Always-on-top + skip-taskbar stay as-is.
