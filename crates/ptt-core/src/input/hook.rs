@@ -7,30 +7,35 @@
 //! anything but the bound input.
 
 use super::{Binding, InputEvent, InputSource, MouseButton};
+use crate::diagnostics;
 use crate::error::{Error, Result};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
-use windows::core::PCWSTR;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    PostThreadMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
-    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_OVERLAPPED, XBUTTON1, XBUTTON2,
+    PostThreadMessageW, RegisterClassW, SetTimer, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
+    MSLLHOOKSTRUCT, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    XBUTTON1, XBUTTON2,
 };
 
 /// `WM_WTS_SESSION_CHANGE` (winuser.h) — windows-rs does not define it.
@@ -144,6 +149,11 @@ impl InputSource for HookInputSource {
         toggle: Option<(Binding, bool)>,
         tx: Sender<InputEvent>,
     ) -> Result<()> {
+        // Fresh session, fresh beats (spec §4): zero the counters and the
+        // stall-rate gate before the hook thread exists. Any beat a running
+        // worker wrote meanwhile self-heals on its next ≤50 ms tick, and the
+        // watchdog needs two seconds of staleness before it reports anything.
+        diagnostics::reset();
         self.stop();
         {
             let mut shared = shared();
@@ -246,6 +256,7 @@ fn hook_thread(ready: Sender<Result<()>>) {
     };
     store_hooks(keyboard, mouse);
     tracing::info!("input hooks installed (keyboard + mouse)");
+    log_hooks_timeout();
 
     // A hidden window on this thread is what receives resume/unlock
     // broadcasts; without it the hooks would silently stop working after a
@@ -257,8 +268,22 @@ fn hook_thread(ready: Sender<Result<()>>) {
     // must already find the raw-input target.
     if let Some(hwnd) = window {
         NOTIFY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        // Heartbeat (spec §4 D2): the notify window beats once a second so
+        // the watchdog can tell a stalled message pump from an idle machine.
+        // Log-only — the timer carries no work.
+        let _ = unsafe { SetTimer(Some(hwnd), 1, 1_000, None) };
     }
     let _ = ready.send(Ok(()));
+
+    // Silent-removal watchdog (spec §4 D3): a separate thread that checks the
+    // recorded beats every two seconds and logs a finding when the pump
+    // stalls, the hooks go silent while input still arrives, or the session
+    // worker stalls. Log-only — it never rehooks or changes input behaviour.
+    let (stop_tx, stop_rx) = channel::<()>();
+    let watchdog_thread = thread::Builder::new()
+        .name("ptt-input-watchdog".into())
+        .spawn(move || watchdog(stop_rx))
+        .ok();
 
     if let Some(hwnd) = window {
         // Not fatal: the session keeps running, only re-installation is lost.
@@ -266,6 +291,13 @@ fn hook_thread(ready: Sender<Result<()>>) {
     }
 
     unsafe { message_loop() };
+
+    // Stop the watchdog at once: dropping the sender wakes it out of its
+    // two-second wait, so this join does not lag session stop by up to 2 s.
+    drop(stop_tx);
+    if let Some(watchdog_thread) = watchdog_thread {
+        let _ = watchdog_thread.join();
+    }
 
     if let Some(hwnd) = window {
         NOTIFY_HWND.store(0, Ordering::SeqCst);
@@ -306,6 +338,68 @@ unsafe fn message_loop() {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
+    }
+}
+
+/// Watchdog loop (spec §4 D3): waits up to two seconds for a stop signal,
+/// then checks the recorded beats and logs one warning per finding. A stop
+/// signal or a dropped sender ends it — the hook thread drops the sender to
+/// wake it immediately instead of waiting out the timeout. Log-only.
+fn watchdog(stop_rx: Receiver<()>) {
+    let mut watchdog = diagnostics::Watchdog::new(diagnostics::tick_ms());
+    loop {
+        match stop_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        for finding in watchdog.check(&diagnostics::snapshot(system_last_input_tick())) {
+            tracing::warn!("{}", finding.message());
+        }
+    }
+}
+
+/// Last system-wide input tick from `GetLastInputInfo`, or `0` when Windows
+/// will not say. A `0` keeps the hooks-silent finding quiet rather than
+/// claiming input is flowing (spec §4 D3).
+fn system_last_input_tick() -> u32 {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a correctly sized, writable LASTINPUTINFO.
+    if unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+        info.dwTime
+    } else {
+        0
+    }
+}
+
+/// Log the effective `LowLevelHooksTimeout` once per hook-thread start
+/// (spec §4 D5). Purely informational: any failure logs "not set or
+/// unreadable" and changes nothing — the hooks install either way.
+fn log_hooks_timeout() {
+    let mut value = [0u8; 4];
+    let mut size = value.len() as u32;
+    // SAFETY: `value`/`size` outlive the call and match the requested DWORD
+    // type; `None` for the type out-parameter is allowed.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Control Panel\\Desktop"),
+            w!("LowLevelHooksTimeout"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.0 == 0 && size == 4 {
+        tracing::info!(
+            "Windows LowLevelHooksTimeout = {} ms",
+            u32::from_le_bytes(value)
+        );
+    } else {
+        tracing::info!("Windows LowLevelHooksTimeout is not set or unreadable");
     }
 }
 
@@ -519,6 +613,12 @@ unsafe extern "system" fn notify_proc(
         // "An application that processes WM_INPUT must return TRUE" — 0.
         return LRESULT(0);
     }
+    // Heartbeat arm (spec §4 D2): every timer tick records a message-loop
+    // beat, so a stalled pump shows up as a watchdog finding. Log-only.
+    if message == WM_TIMER {
+        diagnostics::note_hook_thread();
+        return LRESULT(0);
+    }
     let resumed = message == WM_POWERBROADCAST
         && matches!(
             wparam.0 as u32,
@@ -537,8 +637,37 @@ fn emit(shared: &mut Shared, event: InputEvent) {
     }
 }
 
-/// `WH_KEYBOARD_LL` callback (plan §7): compare, send, return.
+/// `WH_KEYBOARD_LL` measuring wrapper (spec §4 D1).
+///
+/// Records a callback beat on every entry — including `code < 0` — then times
+/// the inner work. `wait_ms` is how long the event waited for the hook to run
+/// (Windows' own event timestamp vs now), `exec_ms` how long our code took;
+/// either crossing its threshold logs a rate-limited stall warning. Log-only:
+/// it never rehooks, reprioritises, or changes what the hook does.
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    diagnostics::note_keyboard_cb();
+    if code < 0 {
+        return unsafe { keyboard_proc_inner(code, wparam, lparam) };
+    }
+    // SAFETY: for `code >= 0` Windows hands a valid KBDLLHOOKSTRUCT in
+    // `lparam`; every installation of this hook relies on that.
+    let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    let wait_ms = unsafe { GetTickCount() }.wrapping_sub(info.time);
+    let started = std::time::Instant::now();
+    let result = unsafe { keyboard_proc_inner(code, wparam, lparam) };
+    let exec_ms = started.elapsed().as_millis() as u64;
+    if let Some(message) = diagnostics::maybe_stall_warning("keyboard", wait_ms, exec_ms) {
+        tracing::warn!("{message}");
+    }
+    result
+}
+
+/// `WH_KEYBOARD_LL` callback (plan §7): compare, send, return.
+unsafe extern "system" fn keyboard_proc_inner(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     log_once(
         &KEYBOARD_FIRST_CALL,
         "keyboard hook callback alive (first keyboard event)",
@@ -635,8 +764,29 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// `WH_MOUSE_LL` callback (plan §7), including the side buttons (plan §1).
+/// `WH_MOUSE_LL` measuring wrapper (spec §4 D1) — the mouse twin of
+/// [`keyboard_proc`]: record a beat, time the inner work, report a stall.
+/// Log-only.
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    diagnostics::note_mouse_cb();
+    if code < 0 {
+        return unsafe { mouse_proc_inner(code, wparam, lparam) };
+    }
+    // SAFETY: for `code >= 0` Windows hands a valid MSLLHOOKSTRUCT in
+    // `lparam`; every installation of this hook relies on that.
+    let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    let wait_ms = unsafe { GetTickCount() }.wrapping_sub(info.time);
+    let started = std::time::Instant::now();
+    let result = unsafe { mouse_proc_inner(code, wparam, lparam) };
+    let exec_ms = started.elapsed().as_millis() as u64;
+    if let Some(message) = diagnostics::maybe_stall_warning("mouse", wait_ms, exec_ms) {
+        tracing::warn!("{message}");
+    }
+    result
+}
+
+/// `WH_MOUSE_LL` callback (plan §7), including the side buttons (plan §1).
+unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     log_once(
         &MOUSE_FIRST_CALL,
         "mouse hook callback alive (first mouse event)",

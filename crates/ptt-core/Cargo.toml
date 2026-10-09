@@ -37,4 +37,10 @@ windows = { version = "0.62", features = [
     "Win32_System_RemoteDesktop",
     # GetTickCount — the shared tick source for input-stall diagnostics
     "Win32_System_SystemInformation",
+    # RegGetValueW — report the LowLevelHooksTimeout Windows applies to our
+    # hooks (input-stall diagnostics, spec §4 D5)
+    "Win32_System_Registry",
+    # GetLastInputInfo — tell a silent hook from an idle machine
+    # (input-stall diagnostics, spec §4 D3)
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
