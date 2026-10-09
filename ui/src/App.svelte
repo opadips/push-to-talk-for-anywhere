@@ -25,6 +25,12 @@
     audio: { device_id: string; release_delay_ms: number; on_exit: "restore" | "unmute" };
     sounds: { enabled: boolean; volume: number };
     app: { start_with_windows: boolean; start_hidden: boolean };
+    overlay: {
+      enabled: boolean;
+      mode: "talk-only" | "always";
+      position: string;
+      distance: number;
+    };
   };
   type UiStatus = {
     state: "disabled" | "muted" | "talking";
@@ -122,6 +128,7 @@
       const payload = clone(form);
       payload.audio.release_delay_ms = Number(payload.audio.release_delay_ms);
       payload.sounds.volume = Number(payload.sounds.volume);
+      payload.overlay.distance = Number(payload.overlay.distance);
       settings = await invoke<Config>("save_settings", { settings: payload });
       form = clone(settings);
       label = await labelFor(form);
@@ -365,6 +372,46 @@
             disabled={!form.sounds.enabled}
           />
           <span class="value">{Math.round(form.sounds.volume * 100)}%</span>
+        </span>
+      </label>
+    </section>
+
+    <section>
+      <h2>Overlay</h2>
+      <label class="check">
+        <input type="checkbox" bind:checked={form.overlay.enabled} />
+        Show an on-screen dot while talking (clicks pass through it)
+      </label>
+      <label class="field">
+        <span>Show</span>
+        <select bind:value={form.overlay.mode} disabled={!form.overlay.enabled}>
+          <option value="talk-only">Only while talking</option>
+          <option value="always">Always (dim while muted)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Position</span>
+        <select bind:value={form.overlay.position} disabled={!form.overlay.enabled}>
+          <option value="top-left">Top left</option>
+          <option value="top-center">Top center</option>
+          <option value="top-right">Top right</option>
+          <option value="bottom-left">Bottom left</option>
+          <option value="bottom-center">Bottom center</option>
+          <option value="bottom-right">Bottom right</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Distance from edge</span>
+        <span class="inline">
+          <input
+            type="range"
+            min="0"
+            max="200"
+            step="4"
+            bind:value={form.overlay.distance}
+            disabled={!form.overlay.enabled}
+          />
+          <span class="value">{form.overlay.distance} px</span>
         </span>
       </label>
     </section>

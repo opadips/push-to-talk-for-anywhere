@@ -169,13 +169,13 @@ fn positions_place_the_badge_on_the_requested_edge() {
 - Consumes: `settings.overlay` from `get_settings` (Task 1's serde shape: `{ enabled, mode, position, distance }`).
 - Produces: nothing new — Save already round-trips the whole `Config`.
 
-- [ ] **Step 1: Extend the TS `Config` interface** with `overlay: { enabled: boolean; mode: "talk-only" | "always"; position: string; distance: number }` and make the draft/save payload carry it (the `clone()`-based payload already sends the whole object once the field exists).
+- [x] **Step 1: Extend the TS `Config` interface** with `overlay: { enabled: boolean; mode: "talk-only" | "always"; position: string; distance: number }` and make the draft/save payload carry it (the `clone()`-based payload already sends the whole object once the field exists).
 
-- [ ] **Step 2: Add the "Overlay" card** — enable checkbox, mode select (Talk only / Always), position select (the 6 values, human labels), distance slider 0–200 (same slider pattern as release delay). No new commands.
+- [x] **Step 2: Add the "Overlay" card** — enable checkbox, mode select (Talk only / Always), position select (the 6 values, human labels), distance slider 0–200 (same slider pattern as release delay). No new commands.
 
-- [ ] **Step 3: Build check** — `npm run build --prefix ui` — Expected: clean.
+- [x] **Step 3: Build check** — `npm run build --prefix ui` — Expected: clean.
 
-- [ ] **Step 4: Commit** — `git add ui/src/App.svelte && git commit -m "feat: overlay card in the settings window"`
+- [x] **Step 4: Commit** — `git add ui/src/App.svelte && git commit -m "feat: overlay card in the settings window"`
 
 ### Task 5: Docs — manual checklist, ideas, README
 
