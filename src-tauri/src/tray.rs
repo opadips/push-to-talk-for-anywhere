@@ -8,10 +8,17 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
+use tracing::{info, warn};
 
 /// How often the tray, the menu and the window are brought in step with the
 /// session. Fast enough that "Talking" appears as you press the key.
 const REFRESH: Duration = Duration::from_millis(100);
+
+/// How many consecutive polls must see the same "live session, config off"
+/// mismatch before it is reconciled: Disable from the menu or the window
+/// also passes through here (config saved first, session a moment later),
+/// and that in-flight choice must never be reverted.
+const RECONCILE_POLLS: u32 = 3;
 
 /// The three state icons of plan §9 M4, embedded at build time.
 pub fn icon(state: SessionState) -> tauri::Result<Image<'static>> {
@@ -83,10 +90,47 @@ pub fn build(app: &tauri::App) -> tauri::Result<(TrayIcon<Wry>, MenuItem<Wry>)> 
 /// session: this is what makes the state *live* in the UI (plan §9 M4).
 pub fn poll(app: AppHandle, tray: TrayIcon<Wry>, toggle: MenuItem<Wry>) {
     let mut last: Option<(SessionState, bool, bool, Option<String>)> = None;
+    let mut mismatch: u32 = 0;
+    // A failed reconcile is logged once; the next state change tries again.
+    // Never spin on it — a broken config save would be retried every
+    // REFRESH forever otherwise.
+    let mut reconcile_failed = false;
 
     loop {
         std::thread::sleep(REFRESH);
         let status = app.state::<AppState>().status();
+
+        // The toggle key can re-enable a disabled app from inside the
+        // session (the engine fires `Enable` itself), leaving `config.enabled`
+        // behind at `false`: the tray menu and the settings header would keep
+        // reading "Enable" while the microphone is live. Reconcile through the
+        // same path the menu uses — it persists the config and sends
+        // `SetEnabled(true)`, which is idempotent at the engine. A state other
+        // than Disabled implies a live session (`AppState::status` maps a dead
+        // or missing one to Disabled). The mismatch must persist for a few
+        // polls first, so a Disable still travelling to the session is never
+        // reverted mid-flight.
+        if status.state != SessionState::Disabled && !status.enabled {
+            mismatch = mismatch.saturating_add(1);
+            if mismatch >= RECONCILE_POLLS && !reconcile_failed {
+                let state = app.state::<AppState>();
+                let outcome = crate::app::set_enabled(&state, true);
+                crate::app::remember(&state, &outcome);
+                match outcome {
+                    Ok(()) => {
+                        info!("the toggle key re-enabled the app: config.toml follows")
+                    }
+                    Err(error) => {
+                        reconcile_failed = true;
+                        warn!("cannot persist the app re-enabled by the toggle key: {error}");
+                    }
+                }
+            }
+        } else {
+            mismatch = 0;
+            reconcile_failed = false;
+        }
+
         let seen = (
             status.state,
             status.enabled,

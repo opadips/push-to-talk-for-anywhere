@@ -221,9 +221,12 @@ default. TG-2 onwards assume a toggle key is bound and Saved.
       open, holding and releasing the PTT key does nothing: the mic stays
       open, no chatter, no extra start/stop cues.
 - [ ] **TG-5 Disable / Enable** — while latched, tray **Disable** → state
-      Disabled and the mic is restored just as today (the latch is
-      cleared); press the toggle key to re-enable — the app goes straight
-      back into the latch (mic open, Talking).
+      Disabled (the latch is cleared). Disabling mid-session does not by
+      itself mute the microphone: the mic is handed back when the session
+      stops (Quit), exactly as before this feature — do not flag that as a
+      failure. Press the toggle key to re-enable — the app goes straight
+      back into the latch (mic open, Talking), and the tray menu item and
+      the settings button must then read **Disable** (the app is on).
 - [ ] **TG-6 Clear** — **Clear** the toggle key, **Save**: the row reads
       "Not set" again and the key is inert (pressing it does nothing).
 - [ ] **TG-7 Swallow** — "Also block the toggle key from other
