@@ -79,9 +79,10 @@ select (6 options), distance slider — saved through the existing
   is explicitly out of scope, v2+).
 - Page: dedicated `ui/overlay.html` (second Vite input) — one dot div,
   CSS pulse (talking) and fade (transitions). No framework needed; plain
-  TS/JS listening to the `status` event, plus one `invoke("get_status")`
-  on load for the initial render. In talk-only mode it calls its own
-  window `hide()`/`show()`.
+  TS/JS reading its mode once via `invoke("get_settings")`, listening to
+  the `status` event, plus one `invoke("get_status")` on load for the
+  initial render. In talk-only mode it calls its own window
+  `hide()`/`show()`.
 - Focus: created with `focused(false)`; implementation must verify on
   Windows that talking never activates the window. Fallback if it does:
   raw `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` via `SetWindowLongPtrW`
@@ -91,13 +92,15 @@ select (6 options), distance slider — saved through the existing
 
 ## Plumbing
 
-- New `app::sync_overlay(app, &config)` called from `save_settings` (and
-  from setup when the app starts with the overlay enabled): creates,
-  repositions, shows or destroys the window per the current config.
+- New `app::overlay::sync_overlay(app: &AppHandle)` (reads the current
+  config from `AppState`) called from `save_settings` (and from setup when
+  the app starts): creates, repositions, shows or destroys the window per
+  the current config.
 - State: nothing new — the poller's `emit("status")` already reaches
   every window; the overlay is a consumer only.
-- The overlay window does not touch the session, the config, or any
-  command other than `get_status`.
+- The overlay window does not touch the session, the config mutex, or any
+  command other than `get_settings` (its own mode, once on load) and
+  `get_status` (initial state).
 
 ## Testing
 
