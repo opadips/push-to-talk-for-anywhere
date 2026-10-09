@@ -56,21 +56,34 @@ const HID_KEYBOARD_USAGE: u16 = 0x06;
 struct Shared {
     binding: Option<Binding>,
     swallow: bool,
+    /// The optional second binding: while `Some`, its presses are forwarded
+    /// as [`InputEvent::ToggleDown`] (its releases are never forwarded).
+    toggle: Option<Binding>,
+    /// Whether the toggle binding is consumed instead of reaching other
+    /// applications — independent of the PTT `swallow`.
+    toggle_swallow: bool,
     capture_tx: Option<Sender<Binding>>,
     event_tx: Option<Sender<InputEvent>>,
     /// Debounce latch: exactly one `BindingDown` per physical press, so
     /// auto-repeat cannot chatter (plan §9 M2).
     key_down: bool,
     mouse_down: bool,
+    /// The same debounce for the toggle binding, one latch per hook.
+    toggle_key_down: bool,
+    toggle_mouse_down: bool,
 }
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared {
     binding: None,
     swallow: false,
+    toggle: None,
+    toggle_swallow: false,
     capture_tx: None,
     event_tx: None,
     key_down: false,
     mouse_down: false,
+    toggle_key_down: false,
+    toggle_mouse_down: false,
 });
 
 /// Thread id of the thread that owns the hooks, so [`HookInputSource::stop`]
@@ -124,16 +137,26 @@ impl HookInputSource {
 }
 
 impl InputSource for HookInputSource {
-    fn start(&mut self, binding: Binding, swallow: bool, tx: Sender<InputEvent>) -> Result<()> {
+    fn start(
+        &mut self,
+        binding: Binding,
+        swallow: bool,
+        toggle: Option<(Binding, bool)>,
+        tx: Sender<InputEvent>,
+    ) -> Result<()> {
         self.stop();
         {
             let mut shared = shared();
             shared.binding = Some(binding);
             shared.swallow = swallow;
+            shared.toggle = toggle.map(|(binding, _)| binding);
+            shared.toggle_swallow = toggle.is_some_and(|(_, swallow)| swallow);
             shared.event_tx = Some(tx);
             shared.capture_tx = None;
             shared.key_down = false;
             shared.mouse_down = false;
+            shared.toggle_key_down = false;
+            shared.toggle_mouse_down = false;
         }
 
         let (ready_tx, ready_rx) = channel();
@@ -159,12 +182,16 @@ impl InputSource for HookInputSource {
         }
     }
 
-    fn set_binding(&mut self, binding: Binding, swallow: bool) {
+    fn set_binding(&mut self, binding: Binding, swallow: bool, toggle: Option<(Binding, bool)>) {
         let mut shared = shared();
         shared.binding = Some(binding);
         shared.swallow = swallow;
+        shared.toggle = toggle.map(|(binding, _)| binding);
+        shared.toggle_swallow = toggle.is_some_and(|(_, swallow)| swallow);
         shared.key_down = false;
         shared.mouse_down = false;
+        shared.toggle_key_down = false;
+        shared.toggle_mouse_down = false;
     }
 
     fn capture_next(&mut self) -> Receiver<Binding> {
@@ -200,6 +227,8 @@ impl InputSource for HookInputSource {
         shared.capture_tx = None;
         shared.key_down = false;
         shared.mouse_down = false;
+        shared.toggle_key_down = false;
+        shared.toggle_mouse_down = false;
     }
 }
 
@@ -321,6 +350,8 @@ fn rehook() {
     let mut shared = shared();
     shared.key_down = false;
     shared.mouse_down = false;
+    shared.toggle_key_down = false;
+    shared.toggle_mouse_down = false;
 }
 
 /// Hidden top-level window on the hook thread — the only way to receive
@@ -548,33 +579,57 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         }
     }
 
-    let Some(binding) = shared.binding else {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    };
-    if !binding.matches_key(vk) {
+    // Compare the key against both bindings under this one guard (plan §11:
+    // only the bound inputs are ever looked at). The press passes through
+    // only when it matches *neither* — the toggle must get its chance even
+    // when the key is not the PTT binding.
+    let ptt = shared
+        .binding
+        .is_some_and(|binding| binding.matches_key(vk));
+    let toggle = shared.toggle.is_some_and(|toggle| toggle.matches_key(vk));
+    if !ptt && !toggle {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
-    let forward = if pressed {
-        // Auto-repeat: one down per physical press (plan §9 M2).
-        let first = !shared.key_down;
-        shared.key_down = true;
-        first
-    } else {
-        shared.key_down = false;
-        true
-    };
-    if forward {
-        let event = if pressed {
-            InputEvent::BindingDown
+    let mut swallowed = false;
+    if ptt {
+        let forward = if pressed {
+            // Auto-repeat: one down per physical press (plan §9 M2).
+            let first = !shared.key_down;
+            shared.key_down = true;
+            first
         } else {
-            InputEvent::BindingUp
+            shared.key_down = false;
+            true
         };
-        emit(&mut shared, event);
+        if forward {
+            let event = if pressed {
+                InputEvent::BindingDown
+            } else {
+                InputEvent::BindingUp
+            };
+            emit(&mut shared, event);
+        }
+        // Consumed: Caps Lock must not toggle, the app must not see it.
+        swallowed = shared.swallow;
+    }
+    if toggle {
+        if pressed {
+            // One ToggleDown per physical press: auto-repeat cannot
+            // chatter; the release emits nothing, it only clears the latch.
+            if !shared.toggle_key_down {
+                shared.toggle_key_down = true;
+                emit(&mut shared, InputEvent::ToggleDown);
+            }
+        } else {
+            shared.toggle_key_down = false;
+        }
+        // A press is consumed if *either* matching binding asked for it;
+        // same key bound to both is not special-cased — both events fire.
+        swallowed |= shared.toggle_swallow;
     }
 
-    if shared.swallow {
-        // Consumed: Caps Lock must not toggle, the app must not see it.
+    if swallowed {
         return LRESULT(1);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -627,31 +682,54 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return LRESULT(1);
     }
 
-    let Some(binding) = shared.binding else {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    };
-    if !binding.matches_mouse(button) {
+    // Compare against both bindings under this one guard (plan §11), like
+    // the keyboard hook: a button that is neither binding passes through.
+    let ptt = shared
+        .binding
+        .is_some_and(|binding| binding.matches_mouse(button));
+    let toggle = shared
+        .toggle
+        .is_some_and(|toggle| toggle.matches_mouse(button));
+    if !ptt && !toggle {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
-    let forward = if pressed {
-        let first = !shared.mouse_down;
-        shared.mouse_down = true;
-        first
-    } else {
-        shared.mouse_down = false;
-        true
-    };
-    if forward {
-        let event = if pressed {
-            InputEvent::BindingDown
+    let mut swallowed = false;
+    if ptt {
+        let forward = if pressed {
+            let first = !shared.mouse_down;
+            shared.mouse_down = true;
+            first
         } else {
-            InputEvent::BindingUp
+            shared.mouse_down = false;
+            true
         };
-        emit(&mut shared, event);
+        if forward {
+            let event = if pressed {
+                InputEvent::BindingDown
+            } else {
+                InputEvent::BindingUp
+            };
+            emit(&mut shared, event);
+        }
+        swallowed = shared.swallow;
+    }
+    if toggle {
+        if pressed {
+            // One ToggleDown per physical press; a release only clears the
+            // latch and emits nothing.
+            if !shared.toggle_mouse_down {
+                shared.toggle_mouse_down = true;
+                emit(&mut shared, InputEvent::ToggleDown);
+            }
+        } else {
+            shared.toggle_mouse_down = false;
+        }
+        // Consumed if *either* matching binding asked for it (plan §4).
+        swallowed |= shared.toggle_swallow;
     }
 
-    if shared.swallow {
+    if swallowed {
         return LRESULT(1);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }

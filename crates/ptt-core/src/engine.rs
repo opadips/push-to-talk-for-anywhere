@@ -80,11 +80,14 @@ impl<C: MicController> Engine<C> {
     /// caller does not have to cancel stale timers: [`Engine::tick`] ignores
     /// ticks that arrive in the wrong state (plan §5).
     pub fn input(&mut self, event: InputEvent, now: Instant) -> Result<Option<Instant>> {
-        let event = match event {
-            InputEvent::BindingDown => Event::PttDown,
-            InputEvent::BindingUp => Event::PttUp,
-        };
-        self.fire(event, now)
+        match event {
+            InputEvent::BindingDown => self.fire(Event::PttDown, now),
+            InputEvent::BindingUp => self.fire(Event::PttUp, now),
+            // Placeholder: the toggle latch lands in the next task, so for
+            // now a toggle press is a deliberate no-op (nothing changes
+            // while the toggle is unbound).
+            InputEvent::ToggleDown => Ok(None),
+        }
     }
 
     /// The release timer fired.

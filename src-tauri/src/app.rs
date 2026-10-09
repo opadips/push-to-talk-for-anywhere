@@ -273,8 +273,11 @@ pub fn apply_settings(state: &AppState, mut settings: Config) -> Result<Config, 
             || current.binding.swallow != settings.binding.swallow
         {
             // The hook takes a new binding without a restart (plan §4).
+            let toggle = settings
+                .toggle_binding()
+                .map(|b| (b, settings.toggle.swallow));
             if let Some(session) = state.session.lock().unwrap().as_ref() {
-                session.rebind(settings.binding(), settings.binding.swallow);
+                session.rebind(settings.binding(), settings.binding.swallow, toggle);
             }
         } else if current.enabled != settings.enabled {
             set_enabled(state, settings.enabled)?;

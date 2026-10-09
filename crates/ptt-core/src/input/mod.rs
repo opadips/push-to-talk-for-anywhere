@@ -200,11 +200,15 @@ fn key_name(vk: u16) -> String {
     }
 }
 
-/// Press / release of the bound input (plan §4).
+/// Press / release of the bound input (plan §4), plus a press of the
+/// optional toggle input — a toggle has no `ToggleUp`: it works on the edge
+/// of the press, and the debounce latch lives in the hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
     BindingDown,
     BindingUp,
+    /// A press of the optional toggle binding (debounced: one per press).
+    ToggleDown,
 }
 
 /// Where bound input comes from (plan §4).
@@ -213,9 +217,20 @@ pub enum InputEvent {
 /// ([`hook`]); tests use a fake.
 pub trait InputSource {
     /// Start listening; events go to `tx`. With `swallow`, the bound input is
-    /// consumed so it never reaches other applications (plan §1).
-    fn start(&mut self, binding: Binding, swallow: bool, tx: Sender<InputEvent>) -> Result<()>;
-    fn set_binding(&mut self, binding: Binding, swallow: bool);
+    /// consumed so it never reaches other applications (plan §1). `toggle` is
+    /// the optional second binding as `(binding, swallow)`: while it is
+    /// `Some`, its presses are forwarded as [`InputEvent::ToggleDown`]
+    /// alongside the bound input (its release is never forwarded).
+    fn start(
+        &mut self,
+        binding: Binding,
+        swallow: bool,
+        toggle: Option<(Binding, bool)>,
+        tx: Sender<InputEvent>,
+    ) -> Result<()>;
+    /// Point a running source at a new binding — and a new optional toggle —
+    /// without a restart (plan §4).
+    fn set_binding(&mut self, binding: Binding, swallow: bool, toggle: Option<(Binding, bool)>);
     /// "Press a key to bind" mode: yields the next input and does not forward
     /// it (plan §4).
     fn capture_next(&mut self) -> Receiver<Binding>;

@@ -51,8 +51,13 @@ pub struct Status {
 pub enum Command {
     /// Tray menu / settings window: arm or disarm the machine.
     SetEnabled(bool),
-    /// The settings window saved a new binding (plan §4).
-    Rebind { binding: Binding, swallow: bool },
+    /// The settings window saved a new binding (plan §4); `toggle` is the
+    /// optional second binding as `(binding, swallow)`.
+    Rebind {
+        binding: Binding,
+        swallow: bool,
+        toggle: Option<(Binding, bool)>,
+    },
     /// The settings window saved new `[sounds]` values (cue on/off, volume).
     SetSounds(SoundsConfig),
     /// "Press any key": the next press answers on this channel.
@@ -111,6 +116,10 @@ impl SessionHandle {
 
         let binding = config.binding();
         let swallow = config.binding.swallow;
+        // The optional toggle rides along with the binding: `None` while it
+        // is unbound (its neutral state — nothing changes for a plain PTT
+        // setup).
+        let toggle = config.toggle_binding().map(|b| (b, config.toggle.swallow));
         let on_exit = config.audio.on_exit;
         let device_id = config.audio.device_id.clone();
 
@@ -126,7 +135,7 @@ impl SessionHandle {
         }
 
         let (events_tx, events_rx) = channel();
-        if let Err(error) = source.start(binding, swallow, events_tx) {
+        if let Err(error) = source.start(binding, swallow, toggle, events_tx) {
             // Nothing has been held yet: undo and clear the record (§6.6).
             engine.mic().set_mute(original_muted)?;
             failsafe::mark_clean(&state_path)?;
@@ -168,9 +177,14 @@ impl SessionHandle {
     }
 
     /// The settings window saved a new binding: it reaches the running hook
-    /// without a restart (plan §4).
-    pub fn rebind(&self, binding: Binding, swallow: bool) {
-        let _ = self.commands.send(Command::Rebind { binding, swallow });
+    /// without a restart (plan §4). `toggle` is the optional second binding
+    /// as `(binding, swallow)`; `None` leaves the toggle unbound.
+    pub fn rebind(&self, binding: Binding, swallow: bool, toggle: Option<(Binding, bool)>) {
+        let _ = self.commands.send(Command::Rebind {
+            binding,
+            swallow,
+            toggle,
+        });
     }
 
     /// The settings window saved new sound settings: they reach the running
@@ -329,7 +343,11 @@ fn pump<C: MicController, S: InputSource>(
                         engine.disable(now)
                     }?;
                 }
-                Ok(Command::Rebind { binding, swallow }) => source.set_binding(binding, swallow),
+                Ok(Command::Rebind {
+                    binding,
+                    swallow,
+                    toggle,
+                }) => source.set_binding(binding, swallow, toggle),
                 Ok(Command::SetSounds(sounds)) => engine.set_sounds(sounds),
                 Ok(Command::Capture(reply)) => {
                     info!("capture armed: the next key press becomes the binding");
@@ -408,7 +426,7 @@ mod tests {
     use crate::config::{AudioConfig, Config};
     use crate::error::Result as CoreResult;
     use crate::input::{Binding, InputEvent, InputSource, MouseButton};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -481,6 +499,9 @@ mod tests {
     struct FakeSource {
         events: Arc<Mutex<Option<Sender<InputEvent>>>>,
         binding: Arc<Mutex<Option<(Binding, bool)>>>,
+        toggle: Arc<Mutex<Option<(Binding, bool)>>>,
+        /// How often `start` ran — a rebind must not restart the session.
+        starts: Arc<AtomicU32>,
         pending_capture: Arc<Mutex<Option<Sender<Binding>>>>,
         stopped: Arc<AtomicBool>,
     }
@@ -497,6 +518,14 @@ mod tests {
 
         fn binding(&self) -> Option<(Binding, bool)> {
             *self.binding.lock().unwrap()
+        }
+
+        fn toggle(&self) -> Option<(Binding, bool)> {
+            *self.toggle.lock().unwrap()
+        }
+
+        fn starts(&self) -> u32 {
+            self.starts.load(Ordering::Relaxed)
         }
 
         fn capturing(&self) -> bool {
@@ -521,15 +550,24 @@ mod tests {
             &mut self,
             binding: Binding,
             swallow: bool,
+            toggle: Option<(Binding, bool)>,
             tx: Sender<InputEvent>,
         ) -> CoreResult<()> {
             *self.binding.lock().unwrap() = Some((binding, swallow));
+            *self.toggle.lock().unwrap() = toggle;
             *self.events.lock().unwrap() = Some(tx);
+            self.starts.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
-        fn set_binding(&mut self, binding: Binding, swallow: bool) {
+        fn set_binding(
+            &mut self,
+            binding: Binding,
+            swallow: bool,
+            toggle: Option<(Binding, bool)>,
+        ) {
             *self.binding.lock().unwrap() = Some((binding, swallow));
+            *self.toggle.lock().unwrap() = toggle;
         }
 
         fn capture_next(&mut self) -> Receiver<Binding> {
@@ -706,10 +744,92 @@ mod tests {
         )
         .unwrap();
 
-        session.rebind(Binding::Mouse(MouseButton::X1), true);
+        session.rebind(Binding::Mouse(MouseButton::X1), true, None);
         assert!(wait_until(|| {
             source.binding() == Some((Binding::Mouse(MouseButton::X1), true))
         }));
+
+        session.stop().unwrap();
+    }
+
+    #[test]
+    fn starting_a_session_passes_the_toggle_binding_to_the_source() {
+        let mic = SharedMic::default();
+        let source = FakeSource::default();
+        let mut cfg = config(0);
+        cfg.toggle.kind = "mouse".to_string();
+        cfg.toggle.mouse_button = "x2".to_string();
+
+        let session = SessionHandle::start_with_sound(
+            cfg,
+            mic.clone(),
+            source.clone(),
+            scratch("toggle-start"),
+            true,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            source.toggle(),
+            Some((Binding::Mouse(MouseButton::X2), true)),
+            "the source must watch the toggle binding alongside the PTT one"
+        );
+        session.stop().unwrap();
+    }
+
+    #[test]
+    fn a_rebind_applies_the_toggle_binding_live() {
+        let mic = SharedMic::default();
+        let source = FakeSource::default();
+        let session = SessionHandle::start(
+            config(0),
+            mic.clone(),
+            source.clone(),
+            scratch("toggle-rebind"),
+            true,
+        )
+        .unwrap();
+
+        session.rebind(
+            Binding::Mouse(MouseButton::X2),
+            true,
+            Some((Binding::Mouse(MouseButton::X1), false)),
+        );
+        assert!(
+            wait_until(|| source.toggle() == Some((Binding::Mouse(MouseButton::X1), false))),
+            "the toggle reaches the running source"
+        );
+        assert_eq!(source.starts(), 1, "a rebind must not restart the session");
+
+        session.stop().unwrap();
+    }
+
+    #[test]
+    fn rebind_with_a_none_toggle_clears_it() {
+        let mic = SharedMic::default();
+        let source = FakeSource::default();
+        let session = SessionHandle::start(
+            config(0),
+            mic.clone(),
+            source.clone(),
+            scratch("toggle-clear"),
+            true,
+        )
+        .unwrap();
+
+        session.rebind(
+            Binding::Mouse(MouseButton::X2),
+            true,
+            Some((Binding::Mouse(MouseButton::X1), false)),
+        );
+        assert!(wait_until(|| source.toggle().is_some()), "first bound");
+
+        session.rebind(Binding::Mouse(MouseButton::X2), true, None);
+        assert!(
+            wait_until(|| source.toggle().is_none()),
+            "the toggle is unbound again"
+        );
 
         session.stop().unwrap();
     }
