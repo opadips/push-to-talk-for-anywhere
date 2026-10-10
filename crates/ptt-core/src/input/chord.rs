@@ -6,7 +6,7 @@
 //! `#[cfg(windows)]` glue, so the pure types and rules live here where the
 //! host test suite can cover them.
 
-use super::{button_label, key_name, MouseButton};
+use super::{button_label, key_name, Binding, MouseButton};
 
 /// Which side of a modifier a chord asks for (spec §3).
 ///
@@ -113,7 +113,9 @@ impl Slot {
         }
     }
 
-    /// The modifier role this slot belongs to.
+    /// The modifier role this slot belongs to. The capture accumulator uses
+    /// it to turn a pressed slot back into the `(Role, Side)` pair a chord
+    /// records (spec §7).
     fn role(self) -> Role {
         match self {
             Self::LeftCtrl | Self::RightCtrl => Role::Ctrl,
@@ -123,7 +125,8 @@ impl Slot {
         }
     }
 
-    /// Whether this slot is the role's left side.
+    /// Whether this slot is the role's left side — likewise part of turning
+    /// a pressed slot back into the side a chord records (spec §7).
     fn is_left(self) -> bool {
         matches!(
             self,
@@ -639,6 +642,203 @@ fn slot_is_member(slot: Slot, modifiers: Modifiers) -> bool {
     }
 }
 
+/// What a press-and-hold capture produced (spec §7): a chord, or the plain
+/// binding an unmodified press stands for — ordinary single-key and
+/// single-mouse bindings stay exactly what they were before chords existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureAnswer {
+    Chord(Chord),
+    Plain(Binding),
+}
+
+/// The press-and-hold capture accumulator (spec §7). While armed it consumes
+/// every member of the sequence the user is building — modifiers accumulate
+/// with the side they were pressed on, a final key or mouse button completes
+/// the answer, and releasing everything completes a modifier-only chord.
+///
+/// Consuming the **entire** sequence, not just the final press, is what
+/// keeps the focused application from holding a modifier it never saw
+/// released: a forwarded Ctrl press whose release is swallowed leaves the
+/// user's editor or browser stuck on Ctrl.
+///
+/// The one rule carried over from today's capture unchanged: a lone modifier
+/// pressed and released is *discarded*, not answered — a bare modifier
+/// cannot be held to talk (spec §3). The accumulator simply re-arms and
+/// keeps waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptureAccumulator {
+    /// Whether a capture is under way; everything is swallowed until an
+    /// answer is produced or the capture is reset.
+    armed: bool,
+    /// The modifier roles accumulated so far, with the side as pressed.
+    modifiers: Modifiers,
+    /// Which modifier slots are physically down, as a set — never a count of
+    /// events. `KBDLLHOOKSTRUCT` reports no repeat bit, so Windows
+    /// auto-repeats a held modifier's key-down: counting events would leave
+    /// this above zero after a single release, and the modifier-only
+    /// chord's release-all would never fire (spec §7). This mirrors what
+    /// [`HeldModifiers`] does for the matcher.
+    held: HeldModifiers,
+}
+
+impl CaptureAccumulator {
+    /// Arm for a new capture: forget everything a previous (cancelled or
+    /// completed) capture left behind and start swallowing. Called when
+    /// "press any key" mode begins.
+    pub fn arm(&mut self) {
+        *self = Self {
+            armed: true,
+            ..Self::default()
+        };
+    }
+
+    /// Whether a capture is mid-sequence and the event must be consumed
+    /// instead of reaching other applications (spec §7).
+    ///
+    /// **Ordering contract — read this before wiring the hook (Task 8):**
+    /// check `swallows()` for an event *before* passing that event to
+    /// [`CaptureAccumulator::note_key`] or [`CaptureAccumulator::note_mouse`].
+    /// If it returns `true`, swallow the event and do not call `note_*` on it
+    /// before the swallow decision is acted on; forward the event only when
+    /// it returns `false`. This method takes no event and reports armed-ness
+    /// only: asking *after* noting is too late, because `note_*` disarms the
+    /// accumulator the instant it produces an answer, so the completing
+    /// press would already have escaped to the focused application.
+    pub fn swallows(&self) -> bool {
+        self.armed
+    }
+
+    /// Note one keyboard event (spec §7's table):
+    ///
+    /// - a modifier press accumulates its role and the side pressed and
+    ///   answers nothing;
+    /// - a non-modifier press completes — `Plain` with no modifier
+    ///   accumulated, a `Chord` otherwise;
+    /// - a release answers nothing; the hook calls
+    ///   [`CaptureAccumulator::note_release_all`] to evaluate a release-all.
+    ///
+    /// Events outside a capture (or after the answer) are inert, so the hook
+    /// may call this unconditionally.
+    pub fn note_key(&mut self, ev: KeyEvent) -> Option<CaptureAnswer> {
+        if !self.armed {
+            return None;
+        }
+        let (down, vk, scan, extended) = match ev {
+            KeyEvent::Down { vk, scan, extended } => (true, vk, scan, extended),
+            KeyEvent::Up { vk, scan, extended } => (false, vk, scan, extended),
+        };
+        if down {
+            if let Some(slot) = modifier_slot(vk, scan, extended) {
+                self.record(slot);
+                // Idempotent: an auto-repeat re-inserts an already-held slot.
+                self.held.insert(slot);
+                None
+            } else {
+                Some(self.complete(ChordKey::Key { vk, scan }))
+            }
+        } else {
+            if let Some(slot) = modifier_slot(vk, scan, extended) {
+                self.held.remove(slot);
+            }
+            None
+        }
+    }
+
+    /// Note a mouse button press (spec §7): it completes the capture, with
+    /// the accumulated modifiers or alone as a plain mouse binding.
+    pub fn note_mouse(&mut self, button: MouseButton) -> Option<CaptureAnswer> {
+        if !self.armed {
+            return None;
+        }
+        Some(self.complete(ChordKey::Mouse(button)))
+    }
+
+    /// Evaluate a moment when no member is physically down anymore (spec
+    /// §7): two or more accumulated modifiers complete a modifier-only
+    /// chord, exactly one is discarded — the bare-modifier rule — and none
+    /// accumulated answers nothing. Only a release-all can produce the
+    /// modifier-only answer, so a press sequence never commits early while
+    /// the user may still add another modifier.
+    pub fn note_release_all(&mut self) -> Option<CaptureAnswer> {
+        // "Nothing physically down" is a set comparison, not a counter:
+        // auto-repeats of one slot must not keep this from being empty.
+        if !self.armed || self.held != HeldModifiers::default() {
+            return None;
+        }
+        match self.requested_roles() {
+            0 => None,
+            // A bare single modifier is not a binding (spec §3): discard it
+            // and re-arm rather than answer.
+            1 => {
+                self.modifiers = Modifiers::default();
+                None
+            }
+            _ => {
+                let chord = Chord {
+                    modifiers: self.modifiers,
+                    key: None,
+                };
+                *self = Self::default();
+                Some(CaptureAnswer::Chord(chord))
+            }
+        }
+    }
+
+    /// Record a pressed modifier slot with its **exact** side (spec §7): a
+    /// left press records [`Side::Left`], a right press records
+    /// [`Side::Right`]. Silently normalising a left press to [`Side::Any`]
+    /// is the alternative spec §7 explicitly rejected — and the settings UI
+    /// (Task 9) offers a three-way Any/Left/Right selector precisely so the
+    /// user can loosen a pin afterwards.
+    ///
+    /// Both sides of one role record into the same field, so the last press
+    /// wins: right-then-left records [`Side::Left`], left-then-right
+    /// [`Side::Right`]. Either way the role still counts exactly once —
+    /// a both-sides sequence is discarded by the bare-modifier rule rather
+    /// than answered as two roles.
+    fn record(&mut self, slot: Slot) {
+        let side = if slot.is_left() {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        match slot.role() {
+            Role::Ctrl => self.modifiers.ctrl = side,
+            Role::Shift => self.modifiers.shift = side,
+            Role::Alt => self.modifiers.alt = side,
+            Role::Win => self.modifiers.win = side,
+        }
+    }
+
+    /// Answer with `final_member` combined with whatever was accumulated,
+    /// and disarm — the sequence is spent.
+    fn complete(&mut self, final_member: ChordKey) -> CaptureAnswer {
+        let modifiers = self.modifiers;
+        let unmodified = self.requested_roles() == 0;
+        *self = Self::default();
+        if unmodified {
+            CaptureAnswer::Plain(match final_member {
+                ChordKey::Key { vk, scan } => Binding::Key { vk, scan },
+                ChordKey::Mouse(button) => Binding::Mouse(button),
+            })
+        } else {
+            CaptureAnswer::Chord(Chord {
+                modifiers,
+                key: Some(final_member),
+            })
+        }
+    }
+
+    /// How many of the four roles have been accumulated.
+    fn requested_roles(&self) -> usize {
+        self.modifiers
+            .roles()
+            .iter()
+            .filter(|(_, side)| *side != Side::Off)
+            .count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1048,6 +1248,14 @@ mod tests {
         }
     }
 
+    fn up_ext(vk: u16, scan: u16) -> KeyEvent {
+        KeyEvent::Up {
+            vk,
+            scan,
+            extended: true,
+        }
+    }
+
     fn ctrl_n_chord() -> Chord {
         Chord {
             modifiers: Modifiers {
@@ -1063,6 +1271,30 @@ mod tests {
             modifiers: Modifiers {
                 ctrl: Side::Any,
                 shift: Side::Any,
+                ..Default::default()
+            },
+            key: None,
+        }
+    }
+
+    /// What a left-Ctrl + N capture answers: the **exact** side is recorded
+    /// (spec §7), unlike the config-style `Any` of [`ctrl_n_chord`].
+    fn left_ctrl_n_chord() -> Chord {
+        Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Left,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        }
+    }
+
+    /// Likewise for a left-Ctrl + left-Shift release-all capture.
+    fn left_ctrl_shift_chord() -> Chord {
+        Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Left,
+                shift: Side::Left,
                 ..Default::default()
             },
             key: None,
@@ -1600,6 +1832,337 @@ mod tests {
         );
         matcher.note_key(up(0x11, 0));
         assert_eq!(matcher.step(&chord, true, &mut state), None);
+    }
+
+    // --- capture: turning a press-and-hold sequence into a binding (spec §7)
+
+    #[test]
+    fn every_slot_reports_the_role_and_side_it_was_pressed_on() {
+        // Capture turns a pressed slot back into the (role, side) pair a
+        // chord records, so the mapping is pinned for all eight slots.
+        for (slot, role, is_left) in [
+            (Slot::LeftCtrl, Role::Ctrl, true),
+            (Slot::RightCtrl, Role::Ctrl, false),
+            (Slot::LeftShift, Role::Shift, true),
+            (Slot::RightShift, Role::Shift, false),
+            (Slot::LeftAlt, Role::Alt, true),
+            (Slot::RightAlt, Role::Alt, false),
+            (Slot::LeftWin, Role::Win, true),
+            (Slot::RightWin, Role::Win, false),
+        ] {
+            assert_eq!(slot.role(), role, "{slot:?} belongs to {role:?}");
+            assert_eq!(slot.is_left(), is_left, "{slot:?} names its side");
+        }
+    }
+
+    fn armed_capture() -> CaptureAccumulator {
+        let mut capture = CaptureAccumulator::default();
+        capture.arm();
+        capture
+    }
+
+    #[test]
+    fn a_lone_modifier_press_accumulates_and_does_not_answer() {
+        let mut capture = armed_capture();
+        assert!(capture.swallows(), "a fresh capture consumes every event");
+        assert_eq!(
+            capture.note_key(down(0x11, 0)),
+            None,
+            "Ctrl alone is the start of a sequence, not an answer"
+        );
+        assert!(
+            capture.swallows(),
+            "still mid-sequence, waiting for the rest"
+        );
+    }
+
+    #[test]
+    fn a_modifier_followed_by_a_key_answers_the_chord() {
+        let mut capture = armed_capture();
+        assert_eq!(capture.note_key(down(0x11, 0)), None, "Ctrl accumulates");
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(left_ctrl_n_chord())),
+            "Ctrl held, then N: the chord Left Ctrl+N — the exact side, per spec §7"
+        );
+        assert!(!capture.swallows(), "the answer disarms the capture");
+    }
+
+    #[test]
+    fn a_modifier_followed_by_a_mouse_button_answers_the_chord() {
+        let mut capture = armed_capture();
+        assert_eq!(capture.note_key(down(0x11, 0)), None);
+        assert_eq!(
+            capture.note_mouse(MouseButton::Left),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Left,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Mouse(MouseButton::Left)),
+            })),
+            "a click while Ctrl is accumulated completes Left Ctrl + Left mouse button"
+        );
+        assert!(!capture.swallows());
+    }
+
+    #[test]
+    fn two_modifiers_then_release_answers_a_modifier_only_chord() {
+        let mut capture = armed_capture();
+        assert_eq!(capture.note_key(down(0x11, 0)), None, "Ctrl accumulates");
+        assert_eq!(
+            capture.note_key(down(0x10, SCAN_LSHIFT)),
+            None,
+            "Shift accumulates"
+        );
+        capture.note_key(up(0x11, 0));
+        assert_eq!(
+            capture.note_release_all(),
+            None,
+            "Shift is still down, so nothing is complete yet"
+        );
+        capture.note_key(up(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            capture.note_release_all(),
+            Some(CaptureAnswer::Chord(left_ctrl_shift_chord())),
+            "releasing everything with two modifiers held completes Left Ctrl+Left Shift"
+        );
+        assert!(!capture.swallows());
+    }
+
+    #[test]
+    fn a_lone_modifier_pressed_and_released_answers_nothing() {
+        let mut capture = armed_capture();
+        capture.note_key(down(0x11, 0)); // Ctrl
+        capture.note_key(up(0x11, 0));
+        assert_eq!(
+            capture.note_release_all(),
+            None,
+            "a bare modifier cannot be held to talk: it is discarded, not answered"
+        );
+        assert!(
+            capture.swallows(),
+            "the discard re-arms — capture keeps waiting"
+        );
+        // The discarded Ctrl left no trace: the next sequence is Shift+N.
+        assert_eq!(capture.note_key(down(0x10, SCAN_LSHIFT)), None);
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    shift: Side::Left,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+            })),
+            "only what was pressed after the discard is recorded"
+        );
+    }
+
+    #[test]
+    fn a_single_unmodified_key_stays_a_plain_binding() {
+        let mut capture = armed_capture();
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Plain(Binding::Key { vk: 0x4E, scan: 49 })),
+            "with no modifier accumulated the press is an ordinary key binding, not a chord"
+        );
+        assert!(!capture.swallows());
+
+        let mut capture = armed_capture();
+        assert_eq!(
+            capture.note_mouse(MouseButton::X1),
+            Some(CaptureAnswer::Plain(Binding::Mouse(MouseButton::X1))),
+            "likewise an unmodified click"
+        );
+        assert!(!capture.swallows());
+    }
+
+    #[test]
+    fn the_pressed_side_is_recorded_exactly() {
+        // Spec §7 records "its role and exact side" for EVERY press; the
+        // alternative — silently recording `Any` — was explicitly rejected.
+        // The settings UI's Any/Left/Right selector is how a user loosens a
+        // pin afterwards, so capture must never loosen it for them.
+
+        // Right Ctrl (extended) pins the side: a binding captured from it
+        // must not fire when the user presses the left Ctrl.
+        let mut capture = armed_capture();
+        assert_eq!(capture.note_key(down_ext(0x11, 0)), None);
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Right,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+            })),
+            "right Ctrl + N records the right pin, never Any"
+        );
+
+        // …and the everyday left Ctrl records its exact side too, so the
+        // captured binding never fires on the right Ctrl unnoticed.
+        let mut capture = armed_capture();
+        capture.note_key(down(0x11, 0));
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(left_ctrl_n_chord())),
+            "left Ctrl + N records the left pin, never Any"
+        );
+
+        // Shift carries its side in the scan code; both sides pin alike.
+        let mut capture = armed_capture();
+        capture.note_key(down(0x10, SCAN_RSHIFT));
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    shift: Side::Right,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+            })),
+            "right Shift + N records the right pin"
+        );
+        let mut capture = armed_capture();
+        capture.note_key(down(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    shift: Side::Left,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+            })),
+            "left Shift + N records the left pin"
+        );
+    }
+
+    #[test]
+    fn modifier_auto_repeat_is_idempotent() {
+        // Windows auto-repeats a held modifier's key-down, and
+        // `KBDLLHOOKSTRUCT` exposes no repeat bit — so the accumulator
+        // itself must treat repeats as no-ops. Capture has to behave
+        // exactly as if the key had gone down once.
+        let mut capture = armed_capture();
+        for repeat in 0..4 {
+            assert_eq!(
+                capture.note_key(down(0x11, 0)),
+                None,
+                "auto-repeat {repeat} of Ctrl accumulates without answering"
+            );
+        }
+        capture.note_key(up(0x11, 0)); // one physical release
+        assert_eq!(
+            capture.note_release_all(),
+            None,
+            "one release after many repeats behaves like one press: discarded"
+        );
+        assert!(
+            capture.swallows(),
+            "the discard re-arms, with no stale modifier left behind"
+        );
+
+        // The exact corruption this pins: a leftover repeated Ctrl would
+        // turn the next sequence into Ctrl+Shift+N instead of Shift+N.
+        assert_eq!(capture.note_key(down(0x10, SCAN_LSHIFT)), None);
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    shift: Side::Left,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+            })),
+            "only Shift is recorded: the repeated Ctrl left no trace"
+        );
+
+        // And a modifier-only chord still completes after repeats, because
+        // the release-all sees slots, not events.
+        let mut capture = armed_capture();
+        for _ in 0..3 {
+            assert_eq!(capture.note_key(down(0x11, 0)), None, "Ctrl auto-repeats");
+        }
+        for _ in 0..3 {
+            assert_eq!(
+                capture.note_key(down(0x10, SCAN_LSHIFT)),
+                None,
+                "Shift auto-repeats too"
+            );
+        }
+        capture.note_key(up(0x11, 0));
+        capture.note_key(up(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            capture.note_release_all(),
+            Some(CaptureAnswer::Chord(left_ctrl_shift_chord())),
+            "two roles after many repeats complete exactly one Ctrl+Shift chord"
+        );
+    }
+
+    #[test]
+    fn both_ctrl_sides_count_as_one_role_and_the_last_press_wins() {
+        // Right Ctrl then left Ctrl is still ONE role, so the release-all
+        // discards it under the bare-modifier rule instead of answering a
+        // two-role chord. The recorded side is order-dependent — last write
+        // wins: right-then-left records `Left` (left-then-right, `Right`).
+        let mut capture = armed_capture();
+        assert_eq!(capture.note_key(down_ext(0x11, 0)), None, "right Ctrl");
+        assert_eq!(
+            capture.note_key(down(0x11, 0)),
+            None,
+            "left Ctrl overwrites the side, not the role"
+        );
+        capture.note_key(up(0x11, 0));
+        capture.note_key(up_ext(0x11, 0));
+        assert_eq!(
+            capture.note_release_all(),
+            None,
+            "both sides of one role is still a bare modifier: discarded"
+        );
+        assert!(capture.swallows(), "the discard re-arms the capture");
+
+        // Last write wins, pinned: with a final key in the mix, right Ctrl
+        // followed by left Ctrl records `Left`.
+        let mut capture = armed_capture();
+        capture.note_key(down_ext(0x11, 0));
+        capture.note_key(down(0x11, 0));
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(left_ctrl_n_chord())),
+            "right-then-left records the left pin: last write wins"
+        );
+    }
+
+    #[test]
+    fn capture_swallows_every_member_of_the_sequence() {
+        // Swallowing the whole sequence is what keeps the focused
+        // application from holding a Ctrl whose press it never saw — its
+        // release must not be forwarded alone either.
+        let mut capture = armed_capture();
+        assert!(
+            capture.swallows(),
+            "the modifier's press is consumed, not forwarded"
+        );
+        assert_eq!(capture.note_key(down(0x11, 0)), None);
+        assert!(capture.swallows(), "mid-sequence every event is consumed");
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(left_ctrl_n_chord())),
+            "the final key's press is consumed along with its answer"
+        );
+        assert!(!capture.swallows(), "the answer ends the sequence");
+        // The releases that follow are ordinary input again.
+        assert_eq!(capture.note_key(up(0x4E, 49)), None);
+        assert_eq!(capture.note_key(up(0x11, 0)), None);
+        assert_eq!(
+            capture.note_release_all(),
+            None,
+            "a disarmed accumulator answers nothing"
+        );
+        assert!(!capture.swallows());
     }
 
     #[test]
