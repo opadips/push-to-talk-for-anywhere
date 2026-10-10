@@ -768,9 +768,17 @@ fn emit(shared: &mut Shared, event: InputEvent) {
 /// (spec §4). This is the one call inside a low-level callback that can wait
 /// on *another application's* hook — an overlay, a game's anti-cheat — so
 /// the stall probe has to see the thread enter it. The phase is saved and
-/// restored around the call because two of the sites run while holding the
-/// shared mutex, and a stall later in the callback must not still read as
+/// restored around the call, so a stall *after* it must not still read as
 /// "inside CallNextHookEx".
+///
+/// **Contract: the caller must never hold the shared mutex across this
+/// call.** Windows can re-enter our own hook while we are inside it; a
+/// nested callback that then blocked on the mutex this frame still owned
+/// would deadlock the hook thread permanently. That is the Apex freeze the
+/// watchdog caught in the field — every one of its 43 stall reports read
+/// `hook-thread phase: waiting for the shared binding mutex`, with 0% CPU
+/// on an idle machine. Both callbacks `drop` their guard immediately before
+/// each call for that reason.
 unsafe fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let previous = diagnostics::current_hook_phase();
     diagnostics::note_hook_phase(diagnostics::HookPhase::CallingNextHook);
@@ -865,6 +873,9 @@ unsafe extern "system" fn keyboard_proc_inner(
         .is_some_and(|binding| binding.matches_key(vk));
     let toggle = shared.toggle.is_some_and(|toggle| toggle.matches_key(vk));
     if !ptt && !toggle {
+        // Never hold `SHARED` across `CallNextHookEx` — Windows can re-enter
+        // our hook during the call and deadlock us on this mutex (`call_next`).
+        drop(shared);
         return unsafe { call_next(code, wparam, lparam) };
     }
 
@@ -909,6 +920,9 @@ unsafe extern "system" fn keyboard_proc_inner(
     if swallowed {
         return LRESULT(1);
     }
+    // Every decision above already happened under the guard; see `call_next`
+    // for why the mutex must be gone before this call.
+    drop(shared);
     unsafe { call_next(code, wparam, lparam) }
 }
 
@@ -992,6 +1006,8 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
         .toggle
         .is_some_and(|toggle| toggle.matches_mouse(button));
     if !ptt && !toggle {
+        // Never hold `SHARED` across `CallNextHookEx` — see `call_next`.
+        drop(shared);
         return unsafe { call_next(code, wparam, lparam) };
     }
 
@@ -1033,6 +1049,9 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
     if swallowed {
         return LRESULT(1);
     }
+    // Every decision above already happened under the guard; see `call_next`
+    // for why the mutex must be gone before this call.
+    drop(shared);
     unsafe { call_next(code, wparam, lparam) }
 }
 

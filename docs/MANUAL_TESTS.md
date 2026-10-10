@@ -252,7 +252,7 @@ bound and Saved.
       warning; Win keys are greyed on both rows; nothing persists before
       **Save**.
 
-### Input-stall diagnostics — DIAG-1…DIAG-6
+### Input-stall diagnostics — DIAG-1…DIAG-7
 
 - [ ] **DIAG-1 Startup line** — after launch the log (%LOCALAPPDATA%\ptt-tool\logs\ptt.log) contains "Windows LowLevelHooksTimeout = …" (a value or "not set").
 - [ ] **DIAG-2 Quiet in normal use** — ordinary typing/mouse use (non-gaming) produces no new WARN lines; if any appear, they are findings — send the log lines verbatim.
@@ -260,6 +260,8 @@ bound and Saved.
 - [ ] **DIAG-4 Panic visibility** — a forced panic (see M3) also writes a "panic at …" line into ptt.log.
 - [ ] **DIAG-5 Reading a stall WARN** — a lone `HookThreadStalled` line while input was actually flowing (or immediately after resume from sleep) is likely `WM_TIMER` starvation under load, not a real stall — correlate it with whether input really froze; `HooksSilent` only fires after the hooks have delivered at least one event. Send any WARN lines verbatim either way.
 - [ ] **DIAG-6 Reading a stall** — each `HookThreadStalled` WARN is followed by two probe lines: `wait-state probe: …` (executing / blocked / starved, with the raw CPU and idle percentages) and `hook-thread phase: …` (which call the thread was standing in — our shared mutex or `CallNextHookEx`). For a stall send both logs, `ptt.log` and the durable `findings.log`, from launch onward, verbatim.
+
+- [ ] **DIAG-7 No deadlock after the mutex fix** — play Apex for at least 20 minutes (all four incidents wedged 12–15 minutes after launch) with ordinary mouse and keyboard use. Expect: no `HookThreadStalled`, no `wait-state probe`, no `hook-thread phase:` and no `HooksSilent` line in either ptt.log or findings.log. If any appear, send both logs from launch onward verbatim.
 
 ## Known limitations (confirm and record, plan §7)
 
