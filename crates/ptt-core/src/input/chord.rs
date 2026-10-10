@@ -112,6 +112,24 @@ impl Slot {
             Self::RightWin => 1 << 7,
         }
     }
+
+    /// The modifier role this slot belongs to.
+    fn role(self) -> Role {
+        match self {
+            Self::LeftCtrl | Self::RightCtrl => Role::Ctrl,
+            Self::LeftShift | Self::RightShift => Role::Shift,
+            Self::LeftAlt | Self::RightAlt => Role::Alt,
+            Self::LeftWin | Self::RightWin => Role::Win,
+        }
+    }
+
+    /// Whether this slot is the role's left side.
+    fn is_left(self) -> bool {
+        matches!(
+            self,
+            Self::LeftCtrl | Self::LeftShift | Self::LeftAlt | Self::LeftWin
+        )
+    }
 }
 
 /// The two slots making up `role`, left first.
@@ -251,12 +269,28 @@ pub struct Chord {
     pub key: Option<ChordKey>,
 }
 
+/// Whether `vk` is one of the modifier virtual keys, generic and
+/// side-specific alike — exactly the set [`modifier_slot`] maps to a
+/// [`Slot`].
+fn is_modifier_vk(vk: u16) -> bool {
+    matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
+}
+
 impl Chord {
     /// A bare single modifier is not a binding — today "press any key"
     /// rejects it ("cannot be held to talk") and it stays rejected (spec §3).
     /// Valid therefore means: there is a final key or mouse button, or at
     /// least two of the four roles are requested.
+    ///
+    /// A final key that is *itself* a modifier vk (`Ctrl+Ctrl`) is rejected
+    /// outright: such a chord would swallow both the press and the release of
+    /// a modifier key, breaking `Ctrl+C` everywhere while it is bound. The
+    /// check lives here so every producer — config, CLI, capture, the
+    /// on-screen keyboard — inherits the guarantee for free.
     pub fn is_valid(&self) -> bool {
+        if matches!(self.key, Some(ChordKey::Key { vk, .. }) if is_modifier_vk(vk)) {
+            return false;
+        }
         self.key.is_some()
             || self
                 .modifiers
@@ -308,6 +342,300 @@ impl Chord {
             None => {}
         }
         parts.join(" ")
+    }
+}
+
+/// A keyboard event as the matcher consumes it (spec §5). `extended` is the
+/// `LLKHF_EXTENDED` flag; together with `vk` and `scan` it lets
+/// [`modifier_slot`] recover which physical side of a modifier moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyEvent {
+    Down { vk: u16, scan: u16, extended: bool },
+    Up { vk: u16, scan: u16, extended: bool },
+}
+
+/// What one event did to one chord binding (spec §5). An event that changes
+/// nothing for the binding is not an outcome at all: [`ChordMatcher::step`]
+/// returns `None` and the hook forwards the event untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The chord became active — the edge that emits `BindingDown` /
+    /// `ToggleDown`. Auto-repeat repeats the *down*, never this edge, so
+    /// one physical press yields exactly one engagement.
+    Engaged { swallow: bool },
+    /// The chord ended: a member was released.
+    Released { swallow: bool },
+}
+
+/// The last event the matcher was told about, key or mouse (spec §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Note {
+    Key {
+        down: bool,
+        vk: u16,
+        /// The physical modifier slot this event belongs to, already
+        /// derived by [`modifier_slot`] in [`ChordMatcher::note_key`].
+        slot: Option<Slot>,
+    },
+    Mouse {
+        down: bool,
+        button: MouseButton,
+    },
+}
+
+impl Note {
+    fn is_down(self) -> bool {
+        match self {
+            Self::Key { down, .. } | Self::Mouse { down, .. } => down,
+        }
+    }
+}
+
+/// Per-binding activation state (spec §5): one instance per chord binding,
+/// so a PTT chord and a toggle chord can be active side by side without
+/// interfering — the matcher itself stays shared and holds only the held
+/// modifiers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChordState {
+    active: bool,
+    /// A modifier-only chord remembers which modifier completed it: that
+    /// one's press was swallowed, so its release must be swallowed too,
+    /// while the other members' releases are forwarded (spec §5, "Swallow").
+    completing: Option<Slot>,
+    /// The chord ended while its final key or button was still held (a
+    /// modifier was released first). Until that member is seen released,
+    /// nothing re-engages the chord: neither the held key's auto-repeat nor
+    /// a re-pressed modifier may resume talking mid-press (spec §5 rule 3).
+    blocked: bool,
+}
+
+impl ChordState {
+    /// Forget everything: no chord is active, blocked or mid-completion.
+    ///
+    /// This is the recovery path for a lost release event. Windows *does*
+    /// drop low-level hooks, so the release that would have cleared
+    /// [`ChordState::blocked`] may never arrive — the chord would then be
+    /// dead until a restart or a rebind. It is meant to be called on session
+    /// start and after rehooking, together with
+    /// [`ChordMatcher::clear_last`] and a `GetAsyncKeyState` resync of the
+    /// held modifiers.
+    pub fn reset(&mut self) {
+        self.active = false;
+        self.blocked = false;
+        self.completing = None;
+    }
+}
+
+/// The pure chord state machine (spec §5), driven by the hook: the hook
+/// calls [`ChordMatcher::note_key`] / [`ChordMatcher::note_mouse`] for every
+/// input event — so modifier state is correct the moment a chord is bound —
+/// and then [`ChordMatcher::step`] once per chord binding.
+#[derive(Debug, Clone, Default)]
+pub struct ChordMatcher {
+    held: HeldModifiers,
+    last: Option<Note>,
+}
+
+impl ChordMatcher {
+    /// Record a keyboard event. Modifier slots are updated *before* the event
+    /// is noted, so a [`ChordMatcher::step`] that follows sees the held state
+    /// as it is after this press or release.
+    pub fn note_key(&mut self, ev: KeyEvent) {
+        let (down, vk, scan, extended) = match ev {
+            KeyEvent::Down { vk, scan, extended } => (true, vk, scan, extended),
+            KeyEvent::Up { vk, scan, extended } => (false, vk, scan, extended),
+        };
+        let slot = modifier_slot(vk, scan, extended);
+        if let Some(slot) = slot {
+            if down {
+                self.held.insert(slot);
+            } else {
+                self.held.remove(slot);
+            }
+        }
+        self.last = Some(Note::Key { down, vk, slot });
+    }
+
+    /// Record a mouse event. Modifier state only ever comes from keys.
+    pub fn note_mouse(&mut self, button: MouseButton, down: bool) {
+        self.last = Some(Note::Mouse { down, button });
+    }
+
+    /// Forget the last noted event, so a [`ChordMatcher::step`] issued after
+    /// a rebind or a rehook cannot act on a note observed before it (a stale
+    /// key-down could otherwise engage the fresh binding spuriously).
+    ///
+    /// Deliberately leaves the held modifiers alone: they are derived from
+    /// real events and re-derived from `GetAsyncKeyState` by the resync
+    /// path, never reset here.
+    pub fn clear_last(&mut self) {
+        self.last = None;
+    }
+
+    /// The four rules of spec §5 for one chord binding, against the event
+    /// last noted:
+    ///
+    /// 1. While inactive, the chord engages only on the *final member's*
+    ///    press with every role matched exactly (spec §4). A modifier press
+    ///    never completes a chord that has a key, which is what makes
+    ///    swallowing safe: no modifier is ever consumed for such a chord,
+    ///    so `Ctrl+C` keeps working everywhere while `Ctrl+N` is bound.
+    /// 2. While active, the release of any *member* ends the chord;
+    ///    presses — even of members — neither drop it nor re-engage it.
+    /// 3. `swallow` is reported only for the completing member; every other
+    ///    member's press and release are forwarded.
+    /// 4. Anything else is `None`: the event reaches other applications
+    ///    untouched, and `state` is left alone.
+    pub fn step(
+        &mut self,
+        chord: &Chord,
+        swallow: bool,
+        state: &mut ChordState,
+    ) -> Option<Outcome> {
+        let note = self.last?;
+
+        if state.active {
+            if !is_release_of_member(note, chord) {
+                return None;
+            }
+            let completing = match state.completing {
+                // Modifier-only: exactly the modifier that completed it.
+                Some(slot) => {
+                    matches!(note, Note::Key { down: false, slot: Some(n), .. } if n == slot)
+                }
+                // Any keyed or mouse chord: its final member completed it.
+                None => is_release_of_final(note, chord),
+            };
+            let released_final = is_release_of_final(note, chord);
+            state.active = false;
+            state.completing = None;
+            // A keyed chord that lost a modifier first still holds its final
+            // key; block re-engagement until that key is released.
+            state.blocked = !released_final && chord.key.is_some();
+            return Some(Outcome::Released {
+                swallow: swallow && completing,
+            });
+        }
+
+        if state.blocked {
+            if is_release_of_final(note, chord) {
+                state.blocked = false;
+            }
+            return None;
+        }
+
+        if !note.is_down() || !self.modifiers_match(chord) {
+            return None;
+        }
+        match chord.key {
+            Some(ChordKey::Key { vk, .. }) => {
+                if matches!(note, Note::Key { down: true, vk: noted, .. } if noted == vk) {
+                    state.active = true;
+                    return Some(Outcome::Engaged { swallow });
+                }
+            }
+            Some(ChordKey::Mouse(button)) => {
+                if matches!(note, Note::Mouse { down: true, button: noted } if noted == button) {
+                    state.active = true;
+                    return Some(Outcome::Engaged { swallow });
+                }
+            }
+            None => {
+                // A modifier-only chord completes on the last of its
+                // members going down (spec §5 rule 2), in either order; the
+                // exact-match check above already guarantees the pressed
+                // modifier is one of the chord's own roles.
+                if let Note::Key {
+                    down: true,
+                    slot: Some(slot),
+                    ..
+                } = note
+                {
+                    state.active = true;
+                    state.completing = Some(slot);
+                    return Some(Outcome::Engaged { swallow });
+                }
+            }
+        }
+        None
+    }
+
+    /// Every role of `chord` matches the held slots exactly (spec §4).
+    fn modifiers_match(&self, chord: &Chord) -> bool {
+        chord
+            .modifiers
+            .roles()
+            .iter()
+            .all(|&(role, side)| role_held(role, side, self.held))
+    }
+}
+
+/// Whether `note` is the release of a member of `chord` (spec §5 rule 2):
+/// one of its modifiers on the requested side, or its final key or button.
+fn is_release_of_member(note: Note, chord: &Chord) -> bool {
+    match (note, chord.key) {
+        (
+            Note::Key {
+                down: false,
+                slot: Some(slot),
+                ..
+            },
+            _,
+        ) => slot_is_member(slot, chord.modifiers),
+        (
+            Note::Key {
+                down: false, vk, ..
+            },
+            Some(ChordKey::Key { vk: bound, .. }),
+        ) => vk == bound,
+        (
+            Note::Mouse {
+                down: false,
+                button,
+            },
+            Some(ChordKey::Mouse(bound)),
+        ) => button == bound,
+        _ => false,
+    }
+}
+
+/// Whether `note` is the release of the chord's final key or button — the
+/// member that completes a keyed chord and is therefore the only one whose
+/// press and release are ever swallowed (spec §5, "Swallow").
+fn is_release_of_final(note: Note, chord: &Chord) -> bool {
+    match (note, chord.key) {
+        (
+            Note::Key {
+                down: false, vk, ..
+            },
+            Some(ChordKey::Key { vk: bound, .. }),
+        ) => vk == bound,
+        (
+            Note::Mouse {
+                down: false,
+                button,
+            },
+            Some(ChordKey::Mouse(bound)),
+        ) => button == bound,
+        _ => false,
+    }
+}
+
+/// Whether `slot` counts as a member of a chord asking for `modifiers` — the
+/// exact matching of [`role_held`] applied to one slot: `Off` never, `Any`
+/// always, `Left`/`Right` only for that side.
+fn slot_is_member(slot: Slot, modifiers: Modifiers) -> bool {
+    let wanted = match slot.role() {
+        Role::Ctrl => modifiers.ctrl,
+        Role::Shift => modifiers.shift,
+        Role::Alt => modifiers.alt,
+        Role::Win => modifiers.win,
+    };
+    match wanted {
+        Side::Off => false,
+        Side::Any => true,
+        Side::Left => slot.is_left(),
+        Side::Right => !slot.is_left(),
     }
 }
 
@@ -385,6 +713,52 @@ mod tests {
             key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
         };
         assert!(chord.is_valid());
+    }
+
+    #[test]
+    fn a_final_key_that_is_a_modifier_vk_is_invalid() {
+        // "Ctrl + Ctrl" would swallow Ctrl's press *and* its release —
+        // breaking `Ctrl+C` everywhere while bound. Every producer inherits
+        // this rejection from `is_valid`.
+        for vk in [
+            0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5,
+        ] {
+            let chord = Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Any,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk, scan: 0 }),
+            };
+            assert!(!chord.is_valid(), "modifier vk {vk:#04x} as a final key");
+            let bare = Chord {
+                modifiers: Modifiers::default(),
+                key: Some(ChordKey::Key { vk, scan: 0 }),
+            };
+            assert!(!bare.is_valid(), "modifier vk {vk:#04x} with no modifiers");
+        }
+
+        let ordinary = Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        };
+        assert!(ordinary.is_valid(), "an ordinary final key like N is fine");
+
+        let modifier_only = Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                shift: Side::Any,
+                ..Default::default()
+            },
+            key: None,
+        };
+        assert!(
+            modifier_only.is_valid(),
+            "a modifier-only chord has no final key at all"
+        );
     }
 
     // --- labels (what the settings window shows) --------------------------
@@ -646,5 +1020,620 @@ mod tests {
         held.insert(Slot::RightShift);
         assert!(!role_held(Role::Shift, Side::Left, held), "same for Shift");
         assert!(!role_held(Role::Shift, Side::Right, held), "same for Shift");
+    }
+
+    // --- the matcher state machine (spec §5) ------------------------------
+
+    fn down(vk: u16, scan: u16) -> KeyEvent {
+        KeyEvent::Down {
+            vk,
+            scan,
+            extended: false,
+        }
+    }
+
+    fn down_ext(vk: u16, scan: u16) -> KeyEvent {
+        KeyEvent::Down {
+            vk,
+            scan,
+            extended: true,
+        }
+    }
+
+    fn up(vk: u16, scan: u16) -> KeyEvent {
+        KeyEvent::Up {
+            vk,
+            scan,
+            extended: false,
+        }
+    }
+
+    fn ctrl_n_chord() -> Chord {
+        Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        }
+    }
+
+    fn ctrl_shift_chord() -> Chord {
+        Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                shift: Side::Any,
+                ..Default::default()
+            },
+            key: None,
+        }
+    }
+
+    // Engagement (spec §5 rule 1).
+
+    #[test]
+    fn a_key_chord_engages_only_when_the_modifiers_are_already_held() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Left Ctrl
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "a modifier press never completes a keyed chord"
+        );
+        matcher.note_key(down(0x4E, 49)); // N
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false }),
+            "N with Ctrl already held completes the chord"
+        );
+    }
+
+    #[test]
+    fn a_key_chord_does_not_engage_when_the_key_came_first() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x4E, 49)); // N before any modifier
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "N alone is not the chord"
+        );
+        matcher.note_key(down(0x11, 0)); // Ctrl arrives afterwards
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "the modifier arriving last must not complete it: N's press was already forwarded"
+        );
+    }
+
+    #[test]
+    fn a_modifier_only_chord_engages_on_the_last_modifier_in_either_order() {
+        let chord = ctrl_shift_chord();
+
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "Ctrl alone is not Ctrl+Shift"
+        );
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Left Shift
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false }),
+            "the second modifier completes it"
+        );
+
+        // The other order, on a fresh matcher and state.
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Shift first
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "Shift alone is not Ctrl+Shift"
+        );
+        matcher.note_key(down(0x11, 0)); // Ctrl last
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false }),
+            "completion is order-independent"
+        );
+    }
+
+    #[test]
+    fn a_pinned_side_does_not_engage_for_the_other_side() {
+        let chord = Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Right,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        };
+
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0)); // Left Ctrl (not extended)
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "the left Ctrl must not fire a Right Ctrl+N chord"
+        );
+
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down_ext(0x11, 0)); // Right Ctrl (extended)
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false }),
+            "the pinned side fires on its own side"
+        );
+    }
+
+    #[test]
+    fn an_extra_unrelated_modifier_prevents_engagement() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Shift, whose side is Off in the chord
+        matcher.note_key(down(0x4E, 49)); // N
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "exact match: Ctrl+Shift+N is a different shortcut and must not talk for Ctrl+N"
+        );
+    }
+
+    // Release (spec §5 rules 2–4).
+
+    #[test]
+    fn releasing_the_modifier_releases_the_chord() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+
+        matcher.note_key(up(0x11, 0)); // Ctrl let go, N still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false }),
+            "releasing the modifier ends the chord right away, but its release is forwarded"
+        );
+        matcher.note_key(up(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the chord already ended, so this release is not an outcome"
+        );
+    }
+
+    #[test]
+    fn re_pressing_a_released_modifier_does_not_reengage_a_keyed_chord() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+
+        matcher.note_key(up(0x11, 0)); // Ctrl let go while N is still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+
+        matcher.note_key(down(0x11, 0)); // Ctrl pressed again
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "talking must not resume while the final key is still down"
+        );
+
+        matcher.note_key(down(0x4E, 49)); // N's auto-repeat, no new physical press
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the held key's auto-repeat must not resume talking either"
+        );
+
+        matcher.note_key(up(0x4E, 49)); // N finally released
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "clears the wait for the final key's release"
+        );
+        matcher.note_key(down(0x4E, 49)); // a genuine new press, Ctrl still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true }),
+            "a fresh press of N talks again — the wait is not a permanent lockout"
+        );
+    }
+
+    #[test]
+    fn a_normal_release_re_arms_the_chord_for_the_next_press() {
+        // The whole chord, modifier and final key, released in the natural
+        // order. `blocked` must stay false here: an unconditional
+        // `blocked = true` would swallow every second and later press.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x4E, 49)); // N
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+
+        matcher.note_key(up(0x4E, 49)); // N released first — the final key
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: true }),
+            "the completing member's own release"
+        );
+        matcher.note_key(up(0x11, 0)); // Ctrl follows
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+
+        matcher.note_key(down(0x11, 0)); // Ctrl again
+        matcher.note_key(down(0x4E, 49)); // N again
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true }),
+            "a normally released chord re-engages on the next press"
+        );
+    }
+
+    #[test]
+    fn a_modifier_only_chord_re_engages_on_a_modifier_re_press() {
+        // Unlike a keyed chord (whose held final key blocks re-engagement),
+        // a modifier-only chord has no held key to misuse, and modifiers do
+        // not auto-repeat — so a fresh press of a member while the other is
+        // held is a new engagement (spec §5 rule 2).
+        let chord = ctrl_shift_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Shift completes it
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+
+        matcher.note_key(up(0x11, 0)); // Ctrl let go, Shift still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+
+        matcher.note_key(down(0x11, 0)); // Ctrl pressed again, Shift still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true }),
+            "modifiers never auto-repeat, so this press is a fresh engagement"
+        );
+    }
+
+    #[test]
+    fn state_reset_clears_active_blocked_and_completing() {
+        // Lost-release recovery: a release that never arrives (Windows drops
+        // low-level hooks) leaves `blocked` set with no way out; `reset` is
+        // the way out.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // Ctrl goes first: N is still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        // N's release never arrives (the hook was dropped).
+
+        state.reset();
+        assert_eq!(state, ChordState::default(), "everything cleared");
+
+        matcher.note_key(down(0x11, 0)); // Ctrl pressed again, N never released
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true }),
+            "after a reset the chord talks again instead of staying dead"
+        );
+
+        // And for a modifier-only chord the reset also forgets which member
+        // completed it.
+        let chord = ctrl_shift_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        state.reset();
+        matcher.note_key(up(0x11, 0));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "a reset chord is inactive, so nothing is released and nothing swallowed"
+        );
+    }
+
+    #[test]
+    fn clear_last_forgets_a_pre_rebind_note() {
+        // A matcher reused across a rebind must not engage the fresh binding
+        // off a note observed before the rebind.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Ctrl genuinely held
+        matcher.note_key(down(0x4E, 49)); // a stale N press, noted pre-rebind
+        matcher.clear_last();
+
+        matcher.note_key(up(0x11, 0)); // the first real event after the rebind
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the stale note cannot engage the rebound binding"
+        );
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "and stepping again is still inert, not a replay"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_key_pressed_while_active_does_not_release_it() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false })
+        );
+
+        matcher.note_key(down(0x4D, 48)); // M
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "an unrelated key passes through without dropping the chord"
+        );
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // even a member-role modifier
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "rule 4: presses never drop an active chord, only releases do"
+        );
+
+        matcher.note_key(up(0x4E, 49)); // the member's own release still ends it
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+    }
+
+    // Emission (spec §5).
+
+    #[test]
+    fn auto_repeat_engages_only_once() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(down(0x4E, 49)); // auto-repeat
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "one BindingDown per physical press"
+        );
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        matcher.note_key(up(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: true })
+        );
+    }
+
+    #[test]
+    fn a_chord_ending_in_a_mouse_button_engages_and_releases() {
+        let chord = Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Mouse(MouseButton::Left)),
+        };
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_mouse(MouseButton::Left, true);
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "the click before Ctrl is not the chord"
+        );
+        matcher.note_key(down(0x11, 0));
+        matcher.note_mouse(MouseButton::Left, true);
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false }),
+            "the click with Ctrl already held completes the chord"
+        );
+
+        matcher.note_mouse(MouseButton::Right, false); // another button let go
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "only the bound button is a member"
+        );
+        matcher.note_mouse(MouseButton::Left, false);
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        matcher.note_key(up(0x11, 0));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            None,
+            "the chord already ended"
+        );
+    }
+
+    // Swallow (spec §5: only the completing member, never a modifier whose
+    // press was forwarded — the worst outcome of this feature is a swallowed
+    // Ctrl breaking `Ctrl+C` everywhere).
+
+    #[test]
+    fn a_firing_chord_swallows_only_the_completing_member() {
+        // Key chord: N completes it, Ctrl never is swallowed.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the modifier's press is forwarded"
+        );
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: true }),
+            "the completing member's release is consumed along with its press"
+        );
+        matcher.note_key(up(0x11, 0));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the modifier's release is forwarded"
+        );
+
+        // Modifier-only chord: the modifier that completed it is the only
+        // one ever swallowed — releasing Ctrl first must forward its
+        // release, or every other app would sit on a Ctrl that never went
+        // down (`Ctrl+C` breaking everywhere).
+        let chord = ctrl_shift_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Shift completes it
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // the non-completing modifier goes first
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false }),
+            "Ctrl's press was forwarded, so its release must be too"
+        );
+        matcher.note_key(up(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the chord already ended; the swallowed Shift's stray release passes through"
+        );
+
+        // And the completing modifier's own release is swallowed, in either
+        // order of release.
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x10, SCAN_LSHIFT)); // the completing modifier goes first
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: true }),
+            "the completing modifier's release is consumed like its press"
+        );
+        matcher.note_key(up(0x11, 0));
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+    }
+
+    #[test]
+    fn swallow_false_reports_no_swallowing() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false })
+        );
+        matcher.note_key(up(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Released { swallow: false }),
+            "with swallowing off, neither edge consumes anything"
+        );
+
+        // Releasing the modifier first likewise swallows nothing.
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false })
+        );
+        matcher.note_key(up(0x11, 0));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
     }
 }
