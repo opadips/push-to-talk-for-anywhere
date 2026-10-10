@@ -384,14 +384,14 @@ fn pump<C: MicController, S: InputSource>(
             }
         }
 
-        // A captured press becomes the binding — except a bare modifier,
-        // which cannot be held to talk, so the capture starts over.
+        // A captured answer becomes the binding. Which answer it is — a
+        // chord, or the plain key/button an unmodified press stands for —
+        // is the accumulator's decision now (spec §7): a bare modifier is
+        // discarded and re-armed inside the hook, so nothing arrives here
+        // that cannot be held to talk, and the hook logs that discard
+        // itself (nothing reaches this loop to log).
         if let Some((received, reply)) = &mut capture {
             match received.try_recv() {
-                Ok(binding) if binding.is_modifier() => {
-                    info!("{binding:?} alone cannot be held to talk — capture starts over");
-                    *received = source.capture_next();
-                }
                 Ok(binding) => {
                     info!("captured {binding:?}");
                     let _ = reply.send(binding);
@@ -441,6 +441,7 @@ mod tests {
     use crate::audio::{DeviceInfo, MicController};
     use crate::config::{AudioConfig, Config};
     use crate::error::Result as CoreResult;
+    use crate::input::chord::{Chord, ChordKey, Modifiers, Side};
     use crate::input::{Binding, InputEvent, InputSource, MouseButton};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
@@ -967,7 +968,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_modifier_is_captured_again_instead_of_becoming_the_binding() {
+    fn a_capture_answer_reaches_the_settings_window_unchanged() {
+        // The bare-modifier rule lives in the hook's capture accumulator
+        // now (spec §7): a lone modifier is discarded there and never
+        // sent, so the session forwards whatever the source answers —
+        // a plain binding or a whole chord — without second-guessing it.
         let mic = SharedMic::default();
         let source = FakeSource::default();
         let session = SessionHandle::start(
@@ -981,16 +986,19 @@ mod tests {
 
         let captured = session.capture();
         assert!(wait_until(|| source.capturing()));
-        source.answer_capture(Binding::Key { vk: 0x11, scan: 0 }); // Ctrl
-        assert!(
-            wait_until(|| source.capturing()),
-            "a bare modifier cannot be held to talk: capture again"
-        );
-        source.answer_capture(Binding::Key { vk: 0x41, scan: 0 }); // A
+        let chord = Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Left,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        });
+        source.answer_capture(chord);
 
         assert_eq!(
             captured.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Binding::Key { vk: 0x41, scan: 0 }
+            chord,
+            "the chord the accumulator answered with arrives whole"
         );
         session.stop().unwrap();
     }

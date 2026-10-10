@@ -6,6 +6,9 @@
 //! forbids any audio/COM work inside them and plan §11 forbids looking at
 //! anything but the bound input.
 
+use super::chord::{
+    CaptureAccumulator, CaptureAnswer, ChordMatcher, ChordState, KeyEvent, Outcome, Role,
+};
 use super::{Binding, InputEvent, InputSource, MouseButton};
 use crate::diagnostics;
 use crate::error::{Error, Result};
@@ -25,7 +28,10 @@ use windows::Win32::System::Threading::{
     GetCurrentThreadId, GetSystemTimes, GetThreadTimes, OpenThread,
     THREAD_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU,
+    VK_RWIN, VK_SHIFT,
+};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RAWKEYBOARD, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
@@ -33,8 +39,8 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     PostThreadMessageW, RegisterClassW, SetTimer, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
-    MSLLHOOKSTRUCT, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND,
+    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED,
+    MSG, MSLLHOOKSTRUCT, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MBUTTONDOWN, WM_MBUTTONUP, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
@@ -49,6 +55,10 @@ const WM_INPUT: u32 = 0x00FF;
 
 /// `RI_KEY_BREAK` (winuser.h) — a raw keyboard report for a key *release*.
 const RI_KEY_BREAK: u16 = 0x0001;
+
+/// `RI_KEY_E0` (winuser.h) — a raw keyboard report carries the E0 (extended)
+/// prefix, the side signal for Ctrl and Alt in the capture accumulator.
+const RI_KEY_E0: u16 = 0x0002;
 
 /// Raw keyboard reports: HID usage page 0x01 (generic desktop), usage 0x06.
 const HID_KEYBOARD_PAGE: u16 = 0x01;
@@ -73,26 +83,30 @@ struct Shared {
     capture_tx: Option<Sender<Binding>>,
     event_tx: Option<Sender<InputEvent>>,
     /// Debounce latch: exactly one `BindingDown` per physical press, so
-    /// auto-repeat cannot chatter (plan §9 M2).
+    /// auto-repeat cannot chatter (plan §9 M2). Only the plain
+    /// [`Binding::Key`]/[`Binding::Mouse`] path consults it; chords debounce
+    /// through [`ChordState::active`]'s edge instead.
     key_down: bool,
     mouse_down: bool,
     /// The same debounce for the toggle binding, one latch per hook.
     toggle_key_down: bool,
     toggle_mouse_down: bool,
+    /// The pure chord state machine (spec §5): told about every key and
+    /// mouse event, stepped once per [`Binding::Chord`] binding.
+    matcher: ChordMatcher,
+    /// The PTT chord's own activation state, so a PTT chord and a toggle
+    /// chord can be active side by side.
+    ptt_chord: ChordState,
+    toggle_chord: ChordState,
+    /// The press-and-hold capture accumulator (spec §7), armed alongside
+    /// `capture_tx`.
+    capture_accumulator: CaptureAccumulator,
 }
 
-static SHARED: Mutex<Shared> = Mutex::new(Shared {
-    binding: None,
-    swallow: false,
-    toggle: None,
-    toggle_swallow: false,
-    capture_tx: None,
-    event_tx: None,
-    key_down: false,
-    mouse_down: false,
-    toggle_key_down: false,
-    toggle_mouse_down: false,
-});
+/// The hook callbacks and the runner share one lazily built guard: the chord
+/// types have no `const` constructor, and a `OnceLock`'s first caller builds
+/// the value exactly once, race-free.
+static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
 
 /// Thread id of the thread that owns the hooks, so [`HookInputSource::stop`]
 /// can end its message loop with `WM_QUIT` (plan §7).
@@ -128,8 +142,99 @@ static CLASS_NAME: OnceLock<Vec<u16>> = OnceLock::new();
 
 fn shared() -> MutexGuard<'static, Shared> {
     SHARED
+        .get_or_init(|| {
+            Mutex::new(Shared {
+                binding: None,
+                swallow: false,
+                toggle: None,
+                toggle_swallow: false,
+                capture_tx: None,
+                event_tx: None,
+                key_down: false,
+                mouse_down: false,
+                toggle_key_down: false,
+                toggle_mouse_down: false,
+                matcher: ChordMatcher::default(),
+                ptt_chord: ChordState::default(),
+                toggle_chord: ChordState::default(),
+                capture_accumulator: CaptureAccumulator::default(),
+            })
+        })
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Forget every chord activation trace. Called wherever the press latches
+/// are reset: a rebind, a restart or a rehook must not inherit an "active"
+/// chord from before, and a release Windows dropped must not leave one
+/// `blocked` until restart (spec §5's desync guard, plan §8 Step 1).
+fn reset_chord_state(shared: &mut Shared) {
+    shared.matcher.clear_last();
+    shared.ptt_chord.reset();
+    shared.toggle_chord.reset();
+}
+
+/// Whether Windows's own asynchronous key state currently reports `key`
+/// down — the high bit of [`GetAsyncKeyState`]'s return value (spec §5).
+fn async_down(key: VIRTUAL_KEY) -> bool {
+    // SAFETY: `GetAsyncKeyState` takes a virtual-key code and returns that
+    // key's async state; no pointers, no preconditions to violate.
+    (unsafe { GetAsyncKeyState(key.0 as i32) } as u16) & 0x8000 != 0
+}
+
+/// The four generic modifier roles as Windows currently believes them
+/// (spec §5's desync guard). Read *before* the caller takes the shared
+/// lock, so nothing that could block ever runs while the guard is held
+/// (`call_next`'s contract).
+fn generic_roles_down() -> [(Role, bool); 4] {
+    [
+        (Role::Ctrl, async_down(VK_CONTROL)),
+        (Role::Shift, async_down(VK_SHIFT)),
+        (Role::Alt, async_down(VK_MENU)),
+        // The one Win role covers both physical Win keys.
+        (Role::Win, async_down(VK_LWIN) || async_down(VK_RWIN)),
+    ]
+}
+
+/// Apply the resync under the lock the caller already holds: Windows *does*
+/// drop low-level hooks, so a key release can be lost and its modifier
+/// would stay "held" in the matcher forever — disabling every chord that
+/// asks for that role until restart. The policy is
+/// [`ChordMatcher::resync_role`]'s: a role Windows reports *up* is cleared,
+/// a role it reports *down* is left to the events — the resync never guesses
+/// which side was held.
+///
+/// Log-only beyond the modifier state itself: no rehook, no thread-priority
+/// change, no event forwarded or swallowed here (spec §5). Nothing here
+/// allocates: `Shared` may only ever be held for a compare plus a send.
+fn apply_resync(shared: &mut Shared, roles: [(Role, bool); 4]) {
+    for (role, down) in roles {
+        shared.matcher.resync_role(role, down);
+    }
+}
+
+/// The one-line `ctrl=down shift=up …` summary of `roles` for the log.
+/// Built by the caller *after* it releases the shared lock: formatting
+/// allocates, and the lock is never held across allocating work.
+fn resync_summary(roles: [(Role, bool); 4]) -> String {
+    roles
+        .iter()
+        .map(|(role, down)| {
+            let state = if *down { "down" } else { "up" };
+            format!("{}={state}", role.name().to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A [`CaptureAnswer`] on the pre-chord `Sender<Binding>` channel: `Plain`
+/// is already a [`Binding`], and `Chord` becomes [`Binding::Chord`] — the
+/// variant exists for exactly this, so neither kind of answer is lost.
+fn answer_binding(answer: CaptureAnswer) -> Binding {
+    match answer {
+        CaptureAnswer::Chord(chord) => Binding::Chord(chord),
+        CaptureAnswer::Plain(binding) => binding,
+    }
 }
 
 /// Input source backed by the low-level keyboard and mouse hooks (plan §7).
@@ -158,6 +263,11 @@ impl InputSource for HookInputSource {
         // watchdog needs two seconds of staleness before it reports anything.
         diagnostics::reset();
         self.stop();
+        // Read the four generic modifier roles *before* taking the lock —
+        // see `generic_roles_down`. A user already holding Ctrl when the
+        // session starts is tracked from the first event, and a chord
+        // cannot be left believing a modifier from a previous session.
+        let roles = generic_roles_down();
         {
             let mut shared = shared();
             shared.binding = Some(binding);
@@ -170,7 +280,11 @@ impl InputSource for HookInputSource {
             shared.mouse_down = false;
             shared.toggle_key_down = false;
             shared.toggle_mouse_down = false;
+            shared.capture_accumulator = CaptureAccumulator::default();
+            reset_chord_state(&mut shared);
+            apply_resync(&mut shared, roles);
         }
+        tracing::debug!("chord modifier resync: {}", resync_summary(roles));
 
         let (ready_tx, ready_rx) = channel();
         let thread = thread::Builder::new()
@@ -205,15 +319,29 @@ impl InputSource for HookInputSource {
         shared.mouse_down = false;
         shared.toggle_key_down = false;
         shared.toggle_mouse_down = false;
+        // A stale activation from the previous binding must not leak into
+        // the new one; held modifiers are event-derived and stay (spec §5).
+        reset_chord_state(&mut shared);
     }
 
     fn capture_next(&mut self) -> Receiver<Binding> {
         let (tx, rx) = channel();
-        shared().capture_tx = Some(tx);
+        {
+            let mut shared = shared();
+            shared.capture_tx = Some(tx);
+            // The accumulator owns the press-and-hold sequence now (spec §7):
+            // it swallows every member and answers with a chord or the plain
+            // binding an unmodified press stands for.
+            shared.capture_accumulator.arm();
+        }
         // Also listen at the raw-input level: while the settings window owns
         // the keyboard focus, the low-level chain never reaches our hook
         // (bug 3), so the hook alone cannot see the press the user is asked
-        // to make. Removed again the moment a press arrives.
+        // to make. Removed again the moment the capture is over — answered
+        // by whichever reporter saw the press first, the other one finding
+        // it already spent (`CaptureAccumulator::is_spent`) — while a
+        // modifier that answers nothing keeps the listener alive, or the
+        // completing key would have nowhere left to arrive.
         add_raw_keyboard();
         rx
     }
@@ -221,7 +349,11 @@ impl InputSource for HookInputSource {
     fn cancel_capture(&mut self) {
         // Nothing may keep eating the next key press once nobody is waiting
         // for it (the window answered by itself, or it was closed).
-        shared().capture_tx = None;
+        {
+            let mut shared = shared();
+            shared.capture_tx = None;
+            shared.capture_accumulator = CaptureAccumulator::default();
+        }
         remove_raw_keyboard();
     }
 
@@ -242,6 +374,8 @@ impl InputSource for HookInputSource {
         shared.mouse_down = false;
         shared.toggle_key_down = false;
         shared.toggle_mouse_down = false;
+        shared.capture_accumulator = CaptureAccumulator::default();
+        reset_chord_state(&mut shared);
     }
 }
 
@@ -565,11 +699,27 @@ fn rehook() {
 
     // A key held across the transition must not leave a stuck latch; a
     // duplicate press this may cause is ignored while already talking.
-    let mut shared = shared();
-    shared.key_down = false;
-    shared.mouse_down = false;
-    shared.toggle_key_down = false;
-    shared.toggle_mouse_down = false;
+    // Chords need the same recovery one step further: Windows may have
+    // dropped a *release* while the hooks were gone, so the chord state is
+    // reset and the four generic modifier roles are re-derived from
+    // `GetAsyncKeyState` — read before the lock, see `generic_roles_down`.
+    let roles = generic_roles_down();
+    {
+        let mut shared = shared();
+        shared.key_down = false;
+        shared.mouse_down = false;
+        shared.toggle_key_down = false;
+        shared.toggle_mouse_down = false;
+        // A capture armed when the hooks dropped is mid-sequence over
+        // events that are gone: its accumulated modifiers would decide the
+        // answer wrongly (a stale Ctrl would turn the next press into a
+        // chord nobody pressed), so disarm the accumulator here alongside
+        // the rest of the press latches and chord state.
+        shared.capture_accumulator = CaptureAccumulator::default();
+        reset_chord_state(&mut shared);
+        apply_resync(&mut shared, roles);
+    }
+    tracing::debug!("chord modifier resync: {}", resync_summary(roles));
 }
 
 /// Hidden top-level window on the hook thread — the only way to receive
@@ -655,8 +805,10 @@ fn remove_raw_keyboard() {
 }
 
 /// The binding a raw keyboard report stands for, if it is a press at all
-/// (bug 3's capture path; the pure decision is [`raw_binding`]).
-unsafe fn raw_keyboard_binding(lparam: LPARAM) -> Option<Binding> {
+/// (bug 3's capture path; the pure decision is [`raw_binding`]), plus the
+/// extended-key flag (`RI_KEY_E0`) — the side signal for Ctrl and Alt, so
+/// the capture accumulator records the side that was actually pressed.
+unsafe fn raw_keyboard_binding(lparam: LPARAM) -> Option<(Binding, bool)> {
     let hraw = HRAWINPUT(lparam.0 as *mut _);
     let header = std::mem::size_of::<RAWINPUTHEADER>() as u32;
     let mut size = 0u32;
@@ -697,6 +849,7 @@ unsafe fn raw_keyboard_binding(lparam: LPARAM) -> Option<Binding> {
         keyboard.MakeCode,
         keyboard.Flags & RI_KEY_BREAK != 0,
     )
+    .map(|binding| (binding, keyboard.Flags & RI_KEY_E0 != 0))
 }
 
 /// Pure decision part of [`raw_keyboard_binding`]: a key *press* becomes
@@ -722,20 +875,64 @@ unsafe extern "system" fn notify_proc(
     diagnostics::note_hook_phase(diagnostics::HookPhase::NotifyWindow);
     // A raw keyboard report for an armed capture (bug 3): deliver it the
     // same way the low-level hook branch does, then stop listening again —
-    // whichever reporter sees the press first wins, the other finds the
-    // capture already spent.
+    // but only once the capture is over, either because this report
+    // answered it or because the low-level hook answered it first and this
+    // duplicate found the accumulator already spent. Whichever reporter
+    // sees the press first wins; the other still has to tear the sink
+    // down.
     if message == WM_INPUT {
-        if let Some(binding) = unsafe { raw_keyboard_binding(lparam) } {
-            let taken = {
+        if let Some((binding, extended)) = unsafe { raw_keyboard_binding(lparam) } {
+            // bug 3's raw-input fallback: while the settings window owns the
+            // keyboard focus the low-level hook may see nothing at all, so
+            // the accumulator is the only place a capture can be
+            // mid-sequence. Only presses arrive here (`raw_binding`), and
+            // the accumulator answers with a chord or the plain binding an
+            // unmodified press stands for. `swallows()` is asked before
+            // `note_key` — its ordering contract — and the event is noted
+            // in both cases; whichever reporter sees the press first wins,
+            // the other finds the accumulator already spent (`is_spent`).
+            // `None` while no answer was produced; `spent` says whether the
+            // capture is over either way — see `CaptureAccumulator::is_spent`.
+            let (answered, spent) = {
                 let mut shared = shared();
-                shared.capture_tx.take()
+                let answer = match binding {
+                    Binding::Key { vk, scan } if shared.capture_accumulator.swallows() => shared
+                        .capture_accumulator
+                        .note_key(KeyEvent::Down { vk, scan, extended })
+                        .or_else(|| shared.capture_accumulator.note_release_all()),
+                    _ => None,
+                };
+                // Asked *after* noting, so an answer this very report
+                // produced counts as spent too.
+                let spent = shared.capture_accumulator.is_spent();
+                let answered = answer.map(|answer| {
+                    let bound = answer_binding(answer);
+                    if let Some(tx) = shared.capture_tx.take() {
+                        let _ = tx.send(bound);
+                    }
+                    bound
+                });
+                (answered, spent)
             };
-            if let Some(tx) = taken {
-                tracing::info!("captured {binding:?} (raw input)");
-                let _ = tx.send(binding);
+            // Everything below runs after the guard is gone: no formatting
+            // — hence no allocation — ever happens while `Shared` is held.
+            if let Some(bound) = answered {
+                tracing::info!("captured {bound:?} (raw input)");
             }
-            // The sink exists only for one capture; this press spent it.
-            remove_raw_keyboard();
+            // Tear the sink down the moment the capture is over — this
+            // report answered it, or the low-level hook answered it first
+            // and this duplicate found the accumulator spent. Leaving
+            // `RIDEV_INPUTSINK` registered after that would cost a
+            // `GetRawInputData` plus a `Vec` allocation on the hook thread
+            // for every keystroke for the rest of the process. Only a
+            // genuine mid-capture press — a modifier, which answers nothing
+            // and is not spent — leaves the listener alive: on the very
+            // machine this fallback exists for, tearing the sink down there
+            // would destroy the only remaining path for the completing key
+            // to arrive, and the capture would hang.
+            if answered.is_some() || spent {
+                remove_raw_keyboard();
+            }
         }
         // "An application that processes WM_INPUT must return TRUE" — 0.
         return LRESULT(0);
@@ -845,34 +1042,109 @@ unsafe extern "system" fn keyboard_proc_inner(
     }
     let vk = info.vkCode as u16;
     let scan = info.scanCode as u16;
+    // The side signal for Ctrl and Alt (spec §4); Shift's side is in the
+    // scan code, the Win keys have distinct vks.
+    let extended = info.flags.contains(LLKHF_EXTENDED);
+    let event = if pressed {
+        KeyEvent::Down { vk, scan, extended }
+    } else {
+        KeyEvent::Up { vk, scan, extended }
+    };
 
     // The one wait this callback can do on *our own* state (spec §4): mark
     // the approach, so a stall here reads as contention on the mutex rather
     // than as the hook chain beyond us.
-    diagnostics::note_hook_phase(diagnostics::HookPhase::AcquiringShared);
-    let mut shared = shared();
-    diagnostics::note_hook_phase(diagnostics::HookPhase::HoldingShared);
+    //
+    // The press-and-hold capture below takes this guard for itself and lets
+    // it go again before the binding comparison re-takes it. Two short
+    // sections rather than one long hold because of what a *discarded* lone
+    // modifier needs: the accumulator discards it — "a bare modifier cannot
+    // be held to talk" (spec §7) — and that discard has to stay observable
+    // in the log, while nothing that allocates, tracing included, may run
+    // while `Shared` is held (the deadlock contract in `call_next`). Each
+    // section is still only a compare plus a send.
+    let discarded_lone_modifier = 'capture: {
+        diagnostics::note_hook_phase(diagnostics::HookPhase::AcquiringShared);
+        let mut shared = shared();
+        diagnostics::note_hook_phase(diagnostics::HookPhase::HoldingShared);
 
-    // "Press a key to bind" mode: the input becomes the binding and never
-    // reaches another window (plan §4). Only a *press* counts: the release
-    // of the key that armed the capture (Enter/Space on the "Change" button)
-    // would otherwise be taken for the answer.
-    if pressed {
-        if let Some(tx) = shared.capture_tx.take() {
-            let _ = tx.send(Binding::Key { vk, scan });
+        // The matcher learns every key event — modifier state must be correct
+        // the moment a chord is bound, even while none is (spec §6).
+        shared.matcher.note_key(event);
+
+        // Press-and-hold capture (spec §7): the whole sequence is consumed so
+        // the focused application never keeps a modifier it did not see
+        // released, and the accumulator answers with a chord or the plain
+        // binding an unmodified press stands for.
+        //
+        // `swallows()` is asked *before* `note_key` — its ordering contract:
+        // noting disarms the accumulator the instant an answer is produced, so
+        // asking afterwards would let the completing press escape. The event is
+        // never dropped on the floor either way: `note_key` sees it in both
+        // cases, and the original event is forwarded only when no capture was
+        // armed.
+        let capturing = shared.capture_accumulator.swallows();
+        let answer = shared.capture_accumulator.note_key(event);
+        if !capturing {
+            break 'capture false;
+        }
+        // Releasing every accumulated modifier completes a modifier-only
+        // chord; a lone modifier is discarded and capture re-arms — the
+        // "a bare modifier cannot be held to talk" rule the session loop
+        // used to enforce now lives in the accumulator (spec §7).
+        let answer = answer.or_else(|| shared.capture_accumulator.note_release_all());
+        // True only for that discard: every other event that answers nothing
+        // — a modifier pressed or released mid-sequence — leaves it false.
+        let discarded = shared.capture_accumulator.discarded_lone_modifier();
+        if let Some(answer) = answer {
+            if let Some(tx) = shared.capture_tx.take() {
+                // Nothing that allocates while `Shared` is held — the
+                // deadlock contract in `call_next`. In particular no log
+                // line here: the session logs the very same
+                // `captured {binding:?}` when it receives the answer, off
+                // the hook thread entirely.
+                let _ = tx.send(answer_binding(answer));
+            }
             return LRESULT(1);
         }
+        if !discarded {
+            // Mid-sequence (a modifier pressed or released): keep waiting —
+            // and keep swallowing.
+            return LRESULT(1);
+        }
+        // The discard: swallowed like every other member of the sequence,
+        // and logged below, where no guard is held.
+        discarded
+    };
+    if discarded_lone_modifier {
+        // The session loop used to see the bare modifier arrive and log
+        // this itself; the accumulator discards it inside the hook now, so
+        // the hook is the only place left that can say so.
+        tracing::info!("a lone modifier cannot be held to talk — capture starts over");
     }
 
     // Compare the key against both bindings under this one guard (plan §11:
     // only the bound inputs are ever looked at). The press passes through
     // only when it matches *neither* — the toggle must get its chance even
     // when the key is not the PTT binding.
+    diagnostics::note_hook_phase(diagnostics::HookPhase::AcquiringShared);
+    let mut shared = shared();
+    diagnostics::note_hook_phase(diagnostics::HookPhase::HoldingShared);
     let ptt = shared
         .binding
         .is_some_and(|binding| binding.matches_key(vk));
     let toggle = shared.toggle.is_some_and(|toggle| toggle.matches_key(vk));
-    if !ptt && !toggle {
+    // Only `Binding::Chord` ever reaches the matcher; `Key` and `Mouse`
+    // keep the existing comparison completely untouched (spec §6).
+    let ptt_chord = match shared.binding {
+        Some(Binding::Chord(chord)) => Some(chord),
+        _ => None,
+    };
+    let toggle_chord = match shared.toggle {
+        Some(Binding::Chord(chord)) => Some(chord),
+        _ => None,
+    };
+    if !ptt && !toggle && ptt_chord.is_none() && toggle_chord.is_none() {
         // Never hold `SHARED` across `CallNextHookEx` — Windows can re-enter
         // our hook during the call and deadlock us on this mutex (`call_next`).
         drop(shared);
@@ -915,6 +1187,63 @@ unsafe extern "system" fn keyboard_proc_inner(
         // A press is consumed if *either* matching binding asked for it;
         // same key bound to both is not special-cased — both events fire.
         swallowed |= shared.toggle_swallow;
+    }
+
+    // A chord binding: one `step` per chord binding, and only ever for
+    // `Binding::Chord` — `ptt`/`toggle` above are false for one. `Engaged`
+    // is the edge that emits (auto-repeat repeats the *down*, never this
+    // edge, so one physical press yields one `BindingDown`), `Released`
+    // ends the chord; both report a swallow only for the chord's
+    // completing member, so every modifier keeps reaching other
+    // applications and `Ctrl+C` keeps working (spec §5).
+    //
+    // Both outcomes are computed before anything is emitted: a
+    // `MutexGuard`'s fields cannot be borrowed disjointly at a call site,
+    // and `emit` needs the whole guard again.
+    if ptt_chord.is_some() || toggle_chord.is_some() {
+        let ptt_swallow = shared.swallow;
+        let toggle_swallow = shared.toggle_swallow;
+        let Shared {
+            matcher,
+            ptt_chord: ptt_state,
+            toggle_chord: toggle_state,
+            ..
+        } = &mut *shared;
+        // Auto-repeat of the completing member while the chord is engaged
+        // is swallowed like the press it repeats (spec §5 rule 3): `step`
+        // answers nothing for a repeat, so without this the focused
+        // application would receive the chord at keyboard-repeat rate for
+        // as long as the user holds it — precisely the guarantee the
+        // plain-key press latch above gives. Decided before `step`, so the
+        // press that engages the chord is never its own repeat.
+        let ptt_repeat =
+            ptt_chord.is_some_and(|chord| matcher.swallows_repeat(&chord, ptt_swallow, ptt_state));
+        let toggle_repeat = toggle_chord
+            .is_some_and(|chord| matcher.swallows_repeat(&chord, toggle_swallow, toggle_state));
+        let ptt_outcome = ptt_chord.and_then(|chord| matcher.step(&chord, ptt_swallow, ptt_state));
+        let toggle_outcome =
+            toggle_chord.and_then(|chord| matcher.step(&chord, toggle_swallow, toggle_state));
+        // A repeat consumes nothing new — it only joins the swallow, which
+        // `swallows_repeat` already gated on the binding's own flag.
+        swallowed |= ptt_repeat | toggle_repeat;
+        // The disjoint borrows end with their last use above.
+        if let Some(Outcome::Engaged { swallow }) = ptt_outcome {
+            emit(&mut shared, InputEvent::BindingDown);
+            swallowed |= swallow;
+        }
+        if let Some(Outcome::Released { swallow }) = ptt_outcome {
+            emit(&mut shared, InputEvent::BindingUp);
+            swallowed |= swallow;
+        }
+        // A toggle works on the press edge only — its release emits
+        // nothing, exactly like the single-input toggle above.
+        if let Some(Outcome::Engaged { swallow }) = toggle_outcome {
+            emit(&mut shared, InputEvent::ToggleDown);
+            swallowed |= swallow;
+        }
+        if let Some(Outcome::Released { swallow }) = toggle_outcome {
+            swallowed |= swallow;
+        }
     }
 
     if swallowed {
@@ -992,8 +1321,32 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
     let mut shared = shared();
     diagnostics::note_hook_phase(diagnostics::HookPhase::HoldingShared);
 
-    if let Some(tx) = shared.capture_tx.take() {
-        let _ = tx.send(Binding::Mouse(button));
+    // The matcher learns every mouse event too — a chord whose final member
+    // is a button completes here (spec §6).
+    shared.matcher.note_mouse(button, pressed);
+
+    // Press-and-hold capture (spec §7): a button *press* completes the
+    // sequence, with the accumulated modifiers or alone as a plain mouse
+    // binding. `swallows()` is asked before `note_mouse` — its ordering
+    // contract — and the event is forwarded only when no capture was armed.
+    let capturing = shared.capture_accumulator.swallows();
+    let answer = if pressed {
+        // `note_mouse` documents itself as a press; a release during
+        // capture is swallowed below but never completes the sequence.
+        shared.capture_accumulator.note_mouse(button)
+    } else {
+        None
+    };
+    if capturing {
+        if let Some(answer) = answer {
+            if let Some(tx) = shared.capture_tx.take() {
+                // Compare and a channel send only — see the keyboard path
+                // for why there is no log line under the guard.
+                let _ = tx.send(answer_binding(answer));
+            }
+            return LRESULT(1);
+        }
+        // Mid-sequence: keep waiting — and keep swallowing.
         return LRESULT(1);
     }
 
@@ -1005,7 +1358,17 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
     let toggle = shared
         .toggle
         .is_some_and(|toggle| toggle.matches_mouse(button));
-    if !ptt && !toggle {
+    // Only `Binding::Chord` ever reaches the matcher; `Key` and `Mouse`
+    // keep the existing comparison completely untouched (spec §6).
+    let ptt_chord = match shared.binding {
+        Some(Binding::Chord(chord)) => Some(chord),
+        _ => None,
+    };
+    let toggle_chord = match shared.toggle {
+        Some(Binding::Chord(chord)) => Some(chord),
+        _ => None,
+    };
+    if !ptt && !toggle && ptt_chord.is_none() && toggle_chord.is_none() {
         // Never hold `SHARED` across `CallNextHookEx` — see `call_next`.
         drop(shared);
         return unsafe { call_next(code, wparam, lparam) };
@@ -1044,6 +1407,44 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
         }
         // Consumed if *either* matching binding asked for it (plan §4).
         swallowed |= shared.toggle_swallow;
+    }
+
+    // Chord bindings — the mouse twin of the keyboard path's block: a
+    // chord whose final member is this button engages or releases here,
+    // with the same completing-member-only swallow (spec §5). Outcomes
+    // first, emissions second — see the keyboard path's comment. No
+    // `swallows_repeat` here: a mouse button generates no auto-repeat, and
+    // a second down of the bound button cannot arrive while the chord is
+    // engaged (any release in between would already have ended it).
+    if ptt_chord.is_some() || toggle_chord.is_some() {
+        let ptt_swallow = shared.swallow;
+        let toggle_swallow = shared.toggle_swallow;
+        let Shared {
+            matcher,
+            ptt_chord: ptt_state,
+            toggle_chord: toggle_state,
+            ..
+        } = &mut *shared;
+        let ptt_outcome = ptt_chord.and_then(|chord| matcher.step(&chord, ptt_swallow, ptt_state));
+        let toggle_outcome =
+            toggle_chord.and_then(|chord| matcher.step(&chord, toggle_swallow, toggle_state));
+        if let Some(Outcome::Engaged { swallow }) = ptt_outcome {
+            emit(&mut shared, InputEvent::BindingDown);
+            swallowed |= swallow;
+        }
+        if let Some(Outcome::Released { swallow }) = ptt_outcome {
+            emit(&mut shared, InputEvent::BindingUp);
+            swallowed |= swallow;
+        }
+        // A toggle works on the press edge only — its release emits
+        // nothing, exactly like the single-input toggle above.
+        if let Some(Outcome::Engaged { swallow }) = toggle_outcome {
+            emit(&mut shared, InputEvent::ToggleDown);
+            swallowed |= swallow;
+        }
+        if let Some(Outcome::Released { swallow }) = toggle_outcome {
+            swallowed |= swallow;
+        }
     }
 
     if swallowed {

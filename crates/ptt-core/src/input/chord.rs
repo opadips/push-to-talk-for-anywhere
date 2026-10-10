@@ -475,6 +475,35 @@ impl ChordMatcher {
         self.last = None;
     }
 
+    /// Re-derive one generic modifier role from a polled reading —
+    /// `GetAsyncKeyState` in the hook, spec §5's desync guard against
+    /// Windows dropping a low-level hook (and with it the key release that
+    /// would have cleared the role).
+    ///
+    /// **This clears only; it never guesses a side.** The generic reading
+    /// cannot tell left from right, so:
+    ///
+    /// - the role reads **up** ⇒ *both* of its slots are cleared. This is
+    ///   the lost-release recovery the resync exists for: a role stuck down
+    ///   would disable every chord demanding it be `off` until restart.
+    /// - the role reads **down** ⇒ the tracked state is left completely
+    ///   alone; no slot is inserted. Picking a side here could only guess,
+    ///   and a wrong guess is a phantom that cannot self-heal: the user's
+    ///   real release removes only their own side, leaving the phantom held
+    ///   for the whole session — `off` chords stop engaging, left pins fire
+    ///   spuriously, right pins never fire, and only a restart or a later
+    ///   rehook heals it. A missed press fails safe instead: the chord does
+    ///   not engage until the user re-presses the modifier, which the event
+    ///   path then tracks exactly (and their microphone stays muted).
+    ///
+    /// The `down` argument is therefore still the whole of the input, but
+    /// only its `false` half acts: `up` heals, `down` defers to events.
+    pub fn resync_role(&mut self, role: Role, down: bool) {
+        if !down {
+            self.held.clear_role(role);
+        }
+    }
+
     /// The four rules of spec §5 for one chord binding, against the event
     /// last noted:
     ///
@@ -561,6 +590,57 @@ impl ChordMatcher {
             }
         }
         None
+    }
+
+    /// Whether the event last noted is an auto-repeat of the **completing**
+    /// member of `chord` while `state` is engaged, and therefore to be
+    /// swallowed like the press it repeats (spec §5 rule 3).
+    ///
+    /// This exists because `step` reports nothing for such a repeat: while
+    /// active it answers only for releases, so the completing key's held
+    /// auto-repeat would otherwise reach the focused application at
+    /// keyboard-repeat rate — roughly 30 repeats a second of `Ctrl+N` for
+    /// as long as the chord is held. The plain-key binding's press latch
+    /// already consumes exactly this repeat; the chord path needs this
+    /// predicate for the same guarantee.
+    ///
+    /// **Ask this before [`ChordMatcher::step`]**: `step` acts on the
+    /// noted event, so asking afterwards could mistake the very press that
+    /// engaged the chord (`state.active` just turned true, `note` its down)
+    /// for its own repeat. Asked first, `state.active` still describes the
+    /// world before this event, which is what "repeat" means.
+    ///
+    /// `swallow` is the binding's own flag, exactly as in `step`: with
+    /// swallowing off the repeat is ordinary input and is reported so.
+    pub fn swallows_repeat(&self, chord: &Chord, swallow: bool, state: &ChordState) -> bool {
+        if !swallow || !state.active {
+            return false;
+        }
+        match (state.completing, self.last) {
+            // A modifier-only chord: exactly the modifier that completed
+            // it, whose press was swallowed and whose repeats must be too.
+            (
+                Some(completing),
+                Some(Note::Key {
+                    down: true,
+                    slot: Some(noted),
+                    ..
+                }),
+            ) => noted == completing,
+            // Any keyed or mouse chord: its final key or button. While the
+            // chord is engaged that member is still down, so every further
+            // of its presses is a repeat — never a fresh physical press.
+            (None, Some(note)) => match chord.key {
+                Some(ChordKey::Key { vk, .. }) => {
+                    matches!(note, Note::Key { down: true, vk: noted, .. } if noted == vk)
+                }
+                Some(ChordKey::Mouse(button)) => {
+                    matches!(note, Note::Mouse { down: true, button: noted } if noted == button)
+                }
+                None => false,
+            },
+            _ => false,
+        }
     }
 
     /// Every role of `chord` matches the held slots exactly (spec §4).
@@ -665,11 +745,24 @@ pub enum CaptureAnswer {
 /// pressed and released is *discarded*, not answered — a bare modifier
 /// cannot be held to talk (spec §3). The accumulator simply re-arms and
 /// keeps waiting.
+///
+/// Whether the capture *already answered* is a separate question from
+/// whether it is armed — hence [`CaptureAccumulator::is_spent`], which the
+/// hook needs to tell "no capture is armed" from "this capture was
+/// answered a moment ago".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CaptureAccumulator {
     /// Whether a capture is under way; everything is swallowed until an
     /// answer is produced or the capture is reset.
     armed: bool,
+    /// Whether this capture already answered — see
+    /// [`CaptureAccumulator::is_spent`]. `armed` alone cannot tell the two
+    /// dead states apart: an answered capture disarms, exactly like a
+    /// process that never armed at all.
+    spent: bool,
+    /// Whether the release-all just evaluated discarded a lone modifier —
+    /// see [`CaptureAccumulator::discarded_lone_modifier`].
+    discarded: bool,
     /// The modifier roles accumulated so far, with the side as pressed.
     modifiers: Modifiers,
     /// Which modifier slots are physically down, as a set — never a count of
@@ -706,6 +799,42 @@ impl CaptureAccumulator {
     /// press would already have escaped to the focused application.
     pub fn swallows(&self) -> bool {
         self.armed
+    }
+
+    /// Whether this capture has already answered: `false` while it is armed
+    /// and still building its sequence — a lone modifier press and the
+    /// bare-modifier discard both leave it `false` — and `true` once an
+    /// answer was produced, staying `true` until the next
+    /// [`CaptureAccumulator::arm`].
+    ///
+    /// **Why the hook cannot do without this:** [`CaptureAccumulator::swallows`]
+    /// returning `false` is ambiguous. It means both "no capture is armed"
+    /// and "this capture was armed, and was answered a moment ago" — and
+    /// the raw-input sink registered for one capture has to be torn down in
+    /// *both* of those cases. Whichever reporter sees the completing press
+    /// first answers it; the other finds the capture spent and must still
+    /// remove `RIDEV_INPUTSINK`, or it would stay registered for the whole
+    /// process lifetime, costing a `GetRawInputData` plus a `Vec`
+    /// allocation on the hook thread for every keystroke forever. Only a
+    /// genuine mid-capture event — which answers nothing and is not spent —
+    /// keeps the listener alive.
+    pub fn is_spent(&self) -> bool {
+        self.spent
+    }
+
+    /// Whether the last [`CaptureAccumulator::note_release_all`] evaluation
+    /// discarded a lone modifier instead of answering it — "a bare modifier
+    /// cannot be held to talk" (spec §3).
+    ///
+    /// A discard is not an answer: the capture re-arms and keeps
+    /// swallowing, so it is neither disarmed nor
+    /// [`spent`](CaptureAccumulator::is_spent). Only the hook can observe
+    /// it, and only from here — the session loop, which used to see the
+    /// bare modifier arrive and log the discard itself, now never hears
+    /// about it. Re-read on every release-all, so it reports the latest
+    /// evaluation rather than a sticky memory of an earlier one.
+    pub fn discarded_lone_modifier(&self) -> bool {
+        self.discarded
     }
 
     /// Note one keyboard event (spec §7's table):
@@ -760,6 +889,10 @@ impl CaptureAccumulator {
     /// modifier-only answer, so a press sequence never commits early while
     /// the user may still add another modifier.
     pub fn note_release_all(&mut self) -> Option<CaptureAnswer> {
+        // Every evaluation reports its own outcome: a discard from an
+        // earlier one is no longer the latest news (the hook logs the flag
+        // right after asking).
+        self.discarded = false;
         // "Nothing physically down" is a set comparison, not a counter:
         // auto-repeats of one slot must not keep this from being empty.
         if !self.armed || self.held != HeldModifiers::default() {
@@ -771,6 +904,7 @@ impl CaptureAccumulator {
             // and re-arm rather than answer.
             1 => {
                 self.modifiers = Modifiers::default();
+                self.discarded = true;
                 None
             }
             _ => {
@@ -779,6 +913,7 @@ impl CaptureAccumulator {
                     key: None,
                 };
                 *self = Self::default();
+                self.spent = true;
                 Some(CaptureAnswer::Chord(chord))
             }
         }
@@ -816,6 +951,10 @@ impl CaptureAccumulator {
         let modifiers = self.modifiers;
         let unmodified = self.requested_roles() == 0;
         *self = Self::default();
+        // An answer is what spends a capture — see `is_spent`. The reset
+        // above cleared the flag with everything else, so it goes back on
+        // here, on the way out.
+        self.spent = true;
         if unmodified {
             CaptureAnswer::Plain(match final_member {
                 ChordKey::Key { vk, scan } => Binding::Key { vk, scan },
@@ -1645,6 +1784,53 @@ mod tests {
         );
     }
 
+    // --- resync (spec §5's desync guard: Windows drops low-level hooks) ---
+
+    #[test]
+    fn a_resync_clears_a_stuck_role_but_never_invents_a_held_side() {
+        // Clear half of the policy: the release Windows dropped would
+        // otherwise leave the role held for the rest of the session,
+        // disabling every chord that asks for it to be `off`.
+        let mut matcher = ChordMatcher::default();
+        matcher.note_key(down_ext(0x11, 0)); // Right Ctrl genuinely held
+        matcher.resync_role(Role::Ctrl, false); // the up reading: its release was lost
+        assert!(
+            !matcher.held.contains(Slot::RightCtrl),
+            "an up reading heals the stuck slot"
+        );
+        assert!(
+            role_held(Role::Ctrl, Side::Off, matcher.held),
+            "the role is off again, so an `off` chord can engage"
+        );
+
+        // Never-guess half, the exact phantom this pins: a DOWN reading
+        // used to insert the LEFT slot whenever no side was tracked. The
+        // user may well have been holding the RIGHT Ctrl when the hook
+        // dropped, so their real release would clear only the right slot —
+        // leaving a phantom left Ctrl held for the whole session.
+        let mut matcher = ChordMatcher::default();
+        matcher.resync_role(Role::Ctrl, true);
+        assert!(
+            !matcher.held.contains(Slot::LeftCtrl) && !matcher.held.contains(Slot::RightCtrl),
+            "a down reading must never guess a side — a phantom slot cannot self-heal"
+        );
+        // An already-tracked side is likewise left alone, whatever the
+        // generic reading says: events are the only source of side detail.
+        matcher.note_key(down_ext(0x11, 0)); // Right Ctrl
+        matcher.resync_role(Role::Ctrl, true);
+        assert!(
+            matcher.held.contains(Slot::RightCtrl) && !matcher.held.contains(Slot::LeftCtrl),
+            "a down reading never rewrites a tracked side either"
+        );
+        // Other roles are untouched by a Ctrl resync.
+        matcher.note_key(down(0x10, SCAN_RSHIFT));
+        matcher.resync_role(Role::Ctrl, false);
+        assert!(
+            matcher.held.contains(Slot::RightShift),
+            "clearing one role never touches another"
+        );
+    }
+
     #[test]
     fn an_unrelated_key_pressed_while_active_does_not_release_it() {
         let chord = ctrl_n_chord();
@@ -2165,6 +2351,143 @@ mod tests {
         assert!(!capture.swallows());
     }
 
+    // --- spent-ness: when the raw-input sink may be torn down -------------
+    //
+    // `swallows() == false` is ambiguous — "nobody is capturing" and "this
+    // capture was answered a moment ago" look the same — and the raw-input
+    // sink registered for one capture must be removed in both of those
+    // cases while a genuine mid-capture event keeps it alive. `is_spent()`
+    // is what tells them apart, so it is pinned here.
+
+    #[test]
+    fn a_fresh_accumulator_is_not_spent() {
+        assert!(
+            !CaptureAccumulator::default().is_spent(),
+            "a process that never armed has answered nothing"
+        );
+        assert!(
+            !armed_capture().is_spent(),
+            "an armed capture is under way, not answered"
+        );
+    }
+
+    #[test]
+    fn arming_clears_the_spent_flag() {
+        let mut capture = armed_capture();
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Plain(Binding::Key { vk: 0x4E, scan: 49 }))
+        );
+        assert!(capture.is_spent(), "the answer spends the capture");
+
+        capture.arm();
+        assert!(
+            !capture.is_spent(),
+            "a new capture starts unspent — its sink must stay up"
+        );
+        assert_eq!(
+            capture.note_key(down(0x41, 30)),
+            Some(CaptureAnswer::Plain(Binding::Key { vk: 0x41, scan: 30 })),
+            "and it answers again, like any fresh capture"
+        );
+        assert!(capture.is_spent(), "spent once more");
+    }
+
+    #[test]
+    fn answering_marks_the_capture_spent() {
+        // A plain binding (no modifier accumulated).
+        let mut capture = armed_capture();
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Plain(Binding::Key { vk: 0x4E, scan: 49 }))
+        );
+        assert!(capture.is_spent(), "a plain key binding spends it");
+
+        // A chord answered by the completing key.
+        let mut capture = armed_capture();
+        capture.note_key(down(0x11, 0)); // Ctrl
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(left_ctrl_n_chord()))
+        );
+        assert!(capture.is_spent(), "a keyed chord spends it too");
+
+        // A chord answered by a mouse button.
+        let mut capture = armed_capture();
+        assert_eq!(
+            capture.note_mouse(MouseButton::Left),
+            Some(CaptureAnswer::Plain(Binding::Mouse(MouseButton::Left)))
+        );
+        assert!(capture.is_spent(), "so does a mouse binding");
+
+        // A modifier-only chord answered by the release-all.
+        let mut capture = armed_capture();
+        capture.note_key(down(0x11, 0));
+        capture.note_key(down(0x10, SCAN_LSHIFT));
+        capture.note_key(up(0x11, 0));
+        capture.note_key(up(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            capture.note_release_all(),
+            Some(CaptureAnswer::Chord(left_ctrl_shift_chord()))
+        );
+        assert!(
+            capture.is_spent(),
+            "and a release-all answer spends it exactly like the others"
+        );
+    }
+
+    #[test]
+    fn a_lone_modifier_press_answers_nothing_and_does_not_spend_the_capture() {
+        // THE case that must keep the raw-input sink alive: on the machine
+        // the sink exists for (bug 3) it is the only remaining path for the
+        // completing key to arrive, so a modifier that answers nothing must
+        // never be mistaken for an answered capture.
+        let mut capture = armed_capture();
+        assert_eq!(
+            capture.note_key(down(0x11, 0)),
+            None,
+            "Ctrl alone answers nothing — it is the start of a sequence"
+        );
+        assert!(
+            !capture.is_spent(),
+            "a mid-capture modifier press must not mark the capture spent"
+        );
+
+        capture.note_key(up(0x11, 0));
+        assert_eq!(
+            capture.note_release_all(),
+            None,
+            "the bare-modifier discard answers nothing either"
+        );
+        assert!(
+            capture.swallows(),
+            "the discard re-arms: the capture is still under way"
+        );
+        assert!(
+            !capture.is_spent(),
+            "a discarded lone modifier must not mark it spent either"
+        );
+        assert!(
+            capture.discarded_lone_modifier(),
+            "but the discard is observable, so the hook can still log it"
+        );
+
+        // The capture is unharmed: the next sequence still completes.
+        assert_eq!(capture.note_key(down(0x10, SCAN_LSHIFT)), None);
+        assert_eq!(
+            capture.note_key(down(0x4E, 49)),
+            Some(CaptureAnswer::Chord(Chord {
+                modifiers: Modifiers {
+                    shift: Side::Left,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+            })),
+            "only what was pressed after the discard is recorded"
+        );
+        assert!(capture.is_spent(), "and the real answer still spends it");
+    }
+
     #[test]
     fn swallow_false_reports_no_swallowing() {
         let chord = ctrl_n_chord();
@@ -2197,6 +2520,141 @@ mod tests {
         assert_eq!(
             matcher.step(&chord, false, &mut state),
             Some(Outcome::Released { swallow: false })
+        );
+    }
+
+    // Auto-repeat of the completing member (spec §5 rule 3, the other half
+    // of the swallow promise): while the chord is engaged the final key is
+    // still down, so every further press of it is a repeat. `step` answers
+    // nothing for one — without `swallows_repeat` the focused application
+    // would receive `Ctrl+N` at keyboard-repeat rate for as long as the
+    // user holds the chord, exactly what the plain-key press latch never
+    // lets happen.
+
+    #[test]
+    fn a_repeat_of_the_completing_key_while_engaged_is_swallowed() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x4E, 49)); // N
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+
+        for repeat in 0..3 {
+            matcher.note_key(down(0x4E, 49)); // N's auto-repeat
+            assert!(
+                matcher.swallows_repeat(&chord, true, &state),
+                "repeat {repeat} of the completing key is consumed, not forwarded"
+            );
+            assert_eq!(
+                matcher.step(&chord, true, &mut state),
+                None,
+                "one BindingDown per physical press — a repeat is never the Engaged edge"
+            );
+        }
+
+        // The binding's own flag still decides, exactly as in `step`.
+        matcher.note_key(down(0x4E, 49));
+        assert!(
+            !matcher.swallows_repeat(&chord, false, &state),
+            "with swallowing off the repeat is forwarded like every other edge"
+        );
+
+        // A modifier-only chord's completing modifier repeats alike.
+        let chord = ctrl_shift_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Shift completes it
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // Shift's repeat
+        assert!(
+            matcher.swallows_repeat(&chord, true, &state),
+            "the completing modifier's repeat is consumed like its press"
+        );
+        matcher.note_key(down(0x11, 0)); // Ctrl's repeat — not the completing member
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "a non-completing member's repeat stays forwarded"
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_the_completing_key_while_not_engaged_is_not_swallowed() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x4E, 49)); // N on its own: the chord never engaged
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "a down of the bound key with no chord engaged is ordinary typing"
+        );
+
+        // And once the chord ended mid-press — Ctrl released while N is
+        // still down — N's repeats are ordinary input again, or the chord
+        // would keep eating `N` long after it stopped talking.
+        matcher.note_key(up(0x4E, 49));
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x4E, 49)); // N
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // Ctrl goes first: the chord ends, N stays down
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        matcher.note_key(down(0x4E, 49)); // N's repeat after the release
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "the chord is no longer engaged, so the repeat is forwarded"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_key_down_while_engaged_is_not_swallowed() {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0)); // Ctrl
+        matcher.note_key(down(0x4E, 49)); // N
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+
+        matcher.note_key(down(0x4D, 48)); // M, while the chord is engaged
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "only the completing member ever repeats into the swallow"
+        );
+        matcher.note_key(up(0x4D, 48)); // and its release
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "a release is never a repeat"
+        );
+        matcher.note_key(down(0x10, SCAN_LSHIFT)); // even a member-role modifier
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "a modifier is not the completing member of a keyed chord"
+        );
+        // The chord is still engaged throughout: `Ctrl+C` and friends keep
+        // working while `Ctrl+N` is held.
+        matcher.note_key(down(0x43, 46)); // C
+        assert!(
+            !matcher.swallows_repeat(&chord, true, &state),
+            "the chord never eats an unrelated key's press"
         );
     }
 }
