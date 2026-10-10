@@ -186,58 +186,74 @@ fn modifier_role_vk(vk: u16) -> u16 {
     }
 }
 
+/// The virtual-key codes [`key_name`] renders by name — the single table
+/// both directions share, so a key can never render one way and parse
+/// another ([`vk_from_name`] is the inverse). The ranges below it (digits,
+/// letters, numpad, function keys) are mirrored in both functions.
+///
+/// `0x5B` and `0x5C` (the two Win keys) deliberately share one caption —
+/// they rendered as "Windows" before this table existed, and one caption
+/// cannot round-trip to two codes; [`vk_from_name`] resolves it to the
+/// left Win key.
+const KEY_NAMES: &[(u16, &str)] = &[
+    (0x08, "Backspace"),
+    (0x09, "Tab"),
+    (0x0D, "Enter"),
+    (0x10, "Shift"),
+    (0x11, "Ctrl"),
+    (0x12, "Alt"),
+    (0x13, "Pause"),
+    (0x14, "Caps Lock"),
+    (0x1B, "Escape"),
+    (0x20, "Space"),
+    (0x21, "Page Up"),
+    (0x22, "Page Down"),
+    (0x23, "End"),
+    (0x24, "Home"),
+    (0x25, "Left Arrow"),
+    (0x26, "Up Arrow"),
+    (0x27, "Right Arrow"),
+    (0x28, "Down Arrow"),
+    (0x2C, "Print Screen"),
+    (0x2D, "Insert"),
+    (0x2E, "Delete"),
+    (0x5B, "Windows"),
+    (0x5C, "Windows"),
+    (0x5D, "Context Menu"),
+    (0x90, "Num Lock"),
+    (0x91, "Scroll Lock"),
+    // Left/right modifiers — bindable (`0xA0..=0xA5`, as the on-screen
+    // keyboard offers); `matches_key` normalises both sides, so a binding
+    // on either side fires whichever side is pressed. They have names.
+    (0xA0, "Left Shift"),
+    (0xA1, "Right Shift"),
+    (0xA2, "Left Ctrl"),
+    (0xA3, "Right Ctrl"),
+    (0xA4, "Left Alt"),
+    (0xA5, "Right Alt"),
+    // Punctuation. `=` `,` `-` `.` are the same key on every layout; the
+    // OEM 1–7 codes are *layout dependent*, so they are named by number
+    // with the US-keyboard glyph as a hint, never by the glyph alone.
+    (0xBB, "Equals (=)"),
+    (0xBC, "Comma (,)"),
+    (0xBD, "Minus (-)"),
+    (0xBE, "Period (.)"),
+    (0xBA, "OEM 1 (; on US)"),
+    (0xBF, "OEM 2 (/ on US)"),
+    (0xC0, "OEM 3 (` on US)"),
+    (0xDB, "OEM 4 ([ on US)"),
+    (0xDC, "OEM 5 (\\ on US)"),
+    (0xDD, "OEM 6 (] on US)"),
+    (0xDE, "OEM 7 (' on US)"),
+];
+
 /// Virtual-key name for [`Binding::label`] (plan §9 M4 shows what the user
 /// pressed). Unknown codes fall back to the hex code the CLI prints.
 pub(crate) fn key_name(vk: u16) -> String {
+    if let Some((_, name)) = KEY_NAMES.iter().find(|(key, _)| *key == vk) {
+        return (*name).to_string();
+    }
     match vk {
-        0x08 => "Backspace".to_string(),
-        0x09 => "Tab".to_string(),
-        0x0D => "Enter".to_string(),
-        0x10 => "Shift".to_string(),
-        0x11 => "Ctrl".to_string(),
-        0x12 => "Alt".to_string(),
-        0x13 => "Pause".to_string(),
-        0x14 => "Caps Lock".to_string(),
-        0x1B => "Escape".to_string(),
-        0x20 => "Space".to_string(),
-        0x21 => "Page Up".to_string(),
-        0x22 => "Page Down".to_string(),
-        0x23 => "End".to_string(),
-        0x24 => "Home".to_string(),
-        0x25 => "Left Arrow".to_string(),
-        0x26 => "Up Arrow".to_string(),
-        0x27 => "Right Arrow".to_string(),
-        0x28 => "Down Arrow".to_string(),
-        0x2C => "Print Screen".to_string(),
-        0x2D => "Insert".to_string(),
-        0x2E => "Delete".to_string(),
-        0x5B | 0x5C => "Windows".to_string(),
-        0x5D => "Context Menu".to_string(),
-        0x90 => "Num Lock".to_string(),
-        0x91 => "Scroll Lock".to_string(),
-        // Left/right modifiers — bindable (`0xA0..=0xA5`, as the on-screen
-        // keyboard offers); `matches_key` normalises both sides, so a binding
-        // on either side fires whichever side is pressed. They have names.
-        0xA0 => "Left Shift".to_string(),
-        0xA1 => "Right Shift".to_string(),
-        0xA2 => "Left Ctrl".to_string(),
-        0xA3 => "Right Ctrl".to_string(),
-        0xA4 => "Left Alt".to_string(),
-        0xA5 => "Right Alt".to_string(),
-        // Punctuation. `=` `,` `-` `.` are the same key on every layout; the
-        // OEM 1–7 codes are *layout dependent*, so they are named by number
-        // with the US-keyboard glyph as a hint, never by the glyph alone.
-        0xBB => "Equals (=)".to_string(),
-        0xBC => "Comma (,)".to_string(),
-        0xBD => "Minus (-)".to_string(),
-        0xBE => "Period (.)".to_string(),
-        0xBA => "OEM 1 (; on US)".to_string(),
-        0xBF => "OEM 2 (/ on US)".to_string(),
-        0xC0 => "OEM 3 (` on US)".to_string(),
-        0xDB => "OEM 4 ([ on US)".to_string(),
-        0xDC => "OEM 5 (\\ on US)".to_string(),
-        0xDD => "OEM 6 (] on US)".to_string(),
-        0xDE => "OEM 7 (' on US)".to_string(),
         // Digits, letters, numpad digits and function keys.
         0x30..=0x39 => ((b'0' + (vk - 0x30) as u8) as char).to_string(),
         0x41..=0x5A => ((b'A' + (vk - 0x41) as u8) as char).to_string(),
@@ -250,6 +266,51 @@ pub(crate) fn key_name(vk: u16) -> String {
         0x70..=0x87 => format!("F{}", vk - 0x6F),
         _ => format!("Key {vk:#04x}"),
     }
+}
+
+/// The inverse of [`key_name`], keyed on the same [`KEY_NAMES`] table and
+/// the same ranges, so a chord key name renders and parses identically.
+/// Case-insensitive: `n`, `N`, `f4` and `Caps Lock` all resolve.
+///
+/// Public because the CLI's `--chord` parser (`ptt-cli/src/cli.rs`) is a
+/// different crate and resolves key-name tokens through this function.
+pub fn vk_from_name(name: &str) -> Option<u16> {
+    if let Some((vk, _)) = KEY_NAMES
+        .iter()
+        .find(|(_, caption)| caption.eq_ignore_ascii_case(name))
+    {
+        return Some(*vk);
+    }
+    // Single letters and digits — `N` is `0x4E`, `5` is `0x35`.
+    if name.len() == 1 {
+        let upper = name.to_ascii_uppercase();
+        match upper.as_bytes()[0] {
+            code @ b'0'..=b'9' => return Some(0x30 + u16::from(code - b'0')),
+            code @ b'A'..=b'Z' => return Some(0x41 + u16::from(code - b'A')),
+            _ => {}
+        }
+    }
+    // Numpad digits and operators.
+    let lower = name.to_ascii_lowercase();
+    if let Some(digit) = lower.strip_prefix("numpad ") {
+        if let Ok(number @ 0..=9) = digit.parse::<u16>() {
+            return Some(0x60 + number);
+        }
+    }
+    match lower.as_str() {
+        "numpad *" => return Some(0x6A),
+        "numpad +" => return Some(0x6B),
+        "numpad -" => return Some(0x6D),
+        "numpad ." => return Some(0x6E),
+        "numpad /" => return Some(0x6F),
+        _ => {}
+    }
+    // Function keys, `F1` to `F24`.
+    lower
+        .strip_prefix('f')
+        .and_then(|number| number.parse::<u16>().ok())
+        .filter(|number| (1..=24).contains(number))
+        .map(|number| 0x6F + number)
 }
 
 /// The settings-window name of a mouse button for [`Binding::label`] and

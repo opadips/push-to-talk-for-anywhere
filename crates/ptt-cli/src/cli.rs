@@ -6,7 +6,8 @@
 use anyhow::{bail, Result};
 use ptt_core::audio::{pick_device, DeviceInfo, MicController, DEFAULT_DEVICE};
 use ptt_core::config::Overrides;
-use ptt_core::input::{Binding, MouseButton};
+use ptt_core::input::chord::{Chord, ChordKey, Modifiers, Role, Side};
+use ptt_core::input::{vk_from_name, Binding, MouseButton};
 
 pub const USAGE: &str = "\
 usage: ptt <command> [options]
@@ -26,6 +27,7 @@ options:
 'ptt' command options:
   --key <vk>            bind a keyboard key by virtual-key code, e.g. 0x14 (Caps Lock)
   --mouse <button>      bind a mouse button: left, right, middle, x1 or x2
+  --chord <spec>        bind a key combination, e.g. ctrl+n, lctrl+shift+f4, ctrl+left
   --release-delay <ms>  mute delay after release, 0-2000 (default 200)
   --no-swallow          also let the bound input reach other windows";
 
@@ -103,6 +105,7 @@ fn parse_ptt(rest: &[String]) -> Result<Command> {
     let mut device = None;
     let mut key: Option<u16> = None;
     let mut mouse: Option<String> = None;
+    let mut chord: Option<String> = None;
     let mut release_delay_ms: Option<u64> = None;
     let mut swallow: Option<bool> = None;
 
@@ -124,18 +127,25 @@ fn parse_ptt(rest: &[String]) -> Result<Command> {
             "--device" => device = Some(value.clone()),
             "--key" => key = Some(parse_vk(value)?),
             "--mouse" => mouse = Some(value.clone()),
+            "--chord" => chord = Some(value.clone()),
             "--release-delay" => release_delay_ms = Some(parse_release_delay(value)?),
             other => bail!("unexpected argument for 'ptt': {other}\n\n{USAGE}"),
         }
         index += 2;
     }
 
-    let binding = match (key, mouse) {
-        (Some(_), Some(_)) => bail!("'ptt' takes either --key or --mouse, not both"),
-        (Some(vk), None) => Some(Binding::Key { vk, scan: 0 }),
-        (None, Some(name)) => Some(Binding::Mouse(MouseButton::from_name(&name)?)),
+    // One binding flag at a time, mirroring the original `--key`/`--mouse`
+    // rule (spec §10: `--chord` is mutually exclusive with both).
+    let binding = match (key, mouse, chord) {
+        (Some(_), Some(_), _) => bail!("'ptt' takes either --key or --mouse, not both"),
+        (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+            bail!("'ptt' takes one of --key, --mouse or --chord, not more")
+        }
+        (Some(vk), None, None) => Some(Binding::Key { vk, scan: 0 }),
+        (None, Some(name), None) => Some(Binding::Mouse(MouseButton::from_name(&name)?)),
+        (None, None, Some(spec)) => Some(parse_chord(&spec).map_err(anyhow::Error::msg)?),
         // No flag: `config.toml` decides (plan §8).
-        (None, None) => None,
+        (None, None, None) => None,
     };
 
     Ok(Command::Ptt(PttSpec {
@@ -162,6 +172,100 @@ fn parse_vk(value: &str) -> Result<u16> {
         bail!("key code 0 is not a key: use a number such as 20 or 0x14 (Caps Lock)");
     }
     Ok(vk)
+}
+
+/// Parse a `--chord` specification (spec §10) into a chord binding:
+/// `+`-separated members — modifier roles (`ctrl`, `shift`, `alt`, `win`),
+/// each optionally side-pinned with an `l`/`r` prefix (`lctrl`, `ralt`) —
+/// ending in a key name, a key code, or a mouse button name. A bare
+/// modifier means `Any`; an all-modifier spec is a modifier-only chord.
+/// Key names resolve through [`vk_from_name`], the inverse of the names the
+/// settings window shows, so `n`, `f4` or `caps lock` parse exactly as they
+/// render; a decimal or `0x`-prefixed code works like `--key`.
+pub fn parse_chord(spec: &str) -> Result<Binding, String> {
+    let members: Vec<&str> = spec.split('+').map(str::trim).collect();
+    let mut modifiers = Modifiers::default();
+    let mut key: Option<ChordKey> = None;
+
+    for (index, member) in members.iter().enumerate() {
+        let Some((role, side)) = parse_chord_modifier(member) else {
+            // Not a modifier: it can only be the chord's final member, so
+            // anything after it would silently change the chord's meaning.
+            if let Some(following) = members[index + 1..].iter().find(|m| !m.is_empty()) {
+                return Err(format!(
+                    "invalid chord {spec:?}: {following:?} comes after {member:?} — \
+                     a chord is modifiers plus at most one key or mouse button"
+                ));
+            }
+            key = Some(match MouseButton::from_name(member) {
+                Ok(button) => ChordKey::Mouse(button),
+                Err(_) => match vk_from_name(member) {
+                    Some(vk) => ChordKey::Key { vk, scan: 0 },
+                    None => ChordKey::Key {
+                        vk: parse_vk(member).map_err(|error| error.to_string())?,
+                        scan: 0,
+                    },
+                },
+            });
+            continue;
+        };
+        let slot = match role {
+            Role::Ctrl => &mut modifiers.ctrl,
+            Role::Shift => &mut modifiers.shift,
+            Role::Alt => &mut modifiers.alt,
+            Role::Win => &mut modifiers.win,
+        };
+        if *slot != Side::Off {
+            return Err(format!(
+                "invalid chord {spec:?}: modifier {member:?} is listed twice"
+            ));
+        }
+        *slot = side;
+    }
+
+    let chord = Chord { modifiers, key };
+    if !chord.is_valid() {
+        return Err(if key.is_some() {
+            format!(
+                "invalid chord {spec:?}: the final key cannot be a modifier \
+                 (that would break the modifier everywhere while bound)"
+            )
+        } else {
+            format!(
+                "invalid chord {spec:?}: a chord needs a key, or at least two \
+                 modifiers — {spec:?} alone cannot be held to talk"
+            )
+        });
+    }
+    Ok(Binding::Chord(chord))
+}
+
+/// A modifier member of a `--chord` spec (spec §10): the bare role name
+/// means `Any`, an `l`/`r` prefix pins the left/right side.
+fn parse_chord_modifier(member: &str) -> Option<(Role, Side)> {
+    let lower = member.to_ascii_lowercase();
+    let (side, role) = match lower.strip_prefix('l') {
+        Some(rest) if is_chord_role(rest) => (Side::Left, rest),
+        _ => match lower.strip_prefix('r') {
+            Some(rest) if is_chord_role(rest) => (Side::Right, rest),
+            _ if is_chord_role(&lower) => (Side::Any, lower.as_str()),
+            _ => return None,
+        },
+    };
+    let role = match role {
+        "ctrl" => Role::Ctrl,
+        "shift" => Role::Shift,
+        "alt" => Role::Alt,
+        "win" => Role::Win,
+        // Unreachable: `is_chord_role` gates every arm above.
+        _ => return None,
+    };
+    Some((role, side))
+}
+
+/// The four modifier role spellings `--chord` accepts, bare or prefixed.
+fn is_chord_role(name: &str) -> bool {
+    matches!(name, "ctrl" | "shift" | "alt" | "win")
 }
 
 /// Plan §8: 0–2000 ms.
@@ -448,6 +552,98 @@ mod tests {
     fn ptt_rejects_an_unknown_flag() {
         let err = parse(&args(&["ptt", "--loud", "yes"])).expect_err("unknown flag");
         assert!(err.to_string().contains("--loud"), "{err}");
+    }
+
+    // --- chords (spec §10: --chord) ---------------------------------------
+
+    /// The chord `spec` parses to, or a panic naming the parse error.
+    fn parsed_chord(spec: &str) -> Chord {
+        match parse_chord(spec).unwrap_or_else(|error| panic!("{spec:?} parses: {error}")) {
+            Binding::Chord(chord) => chord,
+            other => panic!("{spec:?} must be a chord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_chord_parses_modifiers_and_a_key() {
+        let chord = parsed_chord("ctrl+n");
+        assert_eq!(
+            chord.modifiers,
+            Modifiers {
+                ctrl: Side::Any,
+                ..Modifiers::default()
+            },
+            "a bare modifier token means Any"
+        );
+        assert_eq!(chord.key, Some(ChordKey::Key { vk: 0x4E, scan: 0 }));
+    }
+
+    #[test]
+    fn a_chord_parses_multiple_modifiers() {
+        let chord = parsed_chord("ctrl+shift+n");
+        assert_eq!(chord.modifiers.ctrl, Side::Any);
+        assert_eq!(chord.modifiers.shift, Side::Any);
+        assert_eq!(chord.modifiers.alt, Side::Off);
+        assert_eq!(chord.modifiers.win, Side::Off);
+        assert_eq!(chord.key, Some(ChordKey::Key { vk: 0x4E, scan: 0 }));
+    }
+
+    #[test]
+    fn a_chord_pins_a_side_with_an_l_or_r_prefix() {
+        let left = parsed_chord("lctrl+n");
+        assert_eq!(left.modifiers.ctrl, Side::Left);
+        assert_eq!(left.key, Some(ChordKey::Key { vk: 0x4E, scan: 0 }));
+
+        let right = parsed_chord("ralt+f4");
+        assert_eq!(right.modifiers.alt, Side::Right);
+        assert_eq!(
+            right.modifiers.ctrl,
+            Side::Off,
+            "a role no member mentions stays off"
+        );
+        assert_eq!(right.key, Some(ChordKey::Key { vk: 0x73, scan: 0 }), "F4");
+    }
+
+    #[test]
+    fn a_chord_accepts_a_mouse_button() {
+        let chord = parsed_chord("ctrl+left");
+        assert_eq!(chord.modifiers.ctrl, Side::Any);
+        assert_eq!(chord.key, Some(ChordKey::Mouse(MouseButton::Left)));
+    }
+
+    #[test]
+    fn an_all_modifier_chord_is_modifier_only() {
+        let chord = parsed_chord("ctrl+shift");
+        assert_eq!(chord.modifiers.ctrl, Side::Any);
+        assert_eq!(chord.modifiers.shift, Side::Any);
+        assert_eq!(chord.key, None, "no final key: modifier-only chord");
+        assert!(chord.is_valid(), "and it passes Chord::is_valid");
+    }
+
+    #[test]
+    fn a_single_modifier_alone_is_rejected() {
+        let err = parse_chord("ctrl").expect_err("Ctrl alone cannot be held to talk");
+        assert!(
+            err.contains("key"),
+            "the error says a chord needs a key: {err}"
+        );
+    }
+
+    #[test]
+    fn chord_is_mutually_exclusive_with_key_and_mouse() {
+        let err = parse(&args(&["ptt", "--chord", "ctrl+n", "--key", "0x14"]))
+            .expect_err("a chord and a key are ambiguous");
+        assert!(err.to_string().contains("--chord"), "{err}");
+
+        let err = parse(&args(&["ptt", "--chord", "ctrl+n", "--mouse", "x1"]))
+            .expect_err("a chord and a mouse button are ambiguous");
+        assert!(err.to_string().contains("--chord"), "{err}");
+
+        let cmd = parse(&args(&["ptt", "--chord", "ctrl+n"])).expect("a lone --chord parses");
+        assert_eq!(
+            spec(&cmd).binding,
+            Some(parse_chord("ctrl+n").expect("valid chord"))
+        );
     }
 
     // --- device selection ------------------------------------------------
