@@ -5,7 +5,7 @@ members = ["crates/ptt-core", "crates/ptt-cli", "src-tauri"]
 # Version and shared metadata live here (single place); packages inherit them.
 # The product name lives in src-tauri/tauri.conf.json (`productName`).
 [workspace.package]
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 license = "MIT"
 
