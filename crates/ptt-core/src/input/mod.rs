@@ -61,18 +61,44 @@ pub enum Binding {
         scan: u16,
     },
     Mouse(MouseButton),
+    /// A key combination: modifier roles plus at most one final key or mouse
+    /// button, or two or more modifiers alone (`Ctrl+Shift`, spec §3).
+    /// `Copy` like the rest, because [`Binding`] flows through `Option`,
+    /// `Sender` and exhaustive `match`es.
+    Chord(chord::Chord),
 }
 
 impl Binding {
     /// Keyboard hook comparison — **the only comparison the hook performs**
     /// (plan §11: nothing else is ever recorded or stored).
+    ///
+    /// Both sides of the comparison are normalised to the modifier *role*
+    /// (`modifier_role_vk`), so the result does not depend on which form the
+    /// hook reports: a bound left/right modifier (`0xA0..=0xA5`, what the
+    /// on-screen keyboard offers) fires on the generic `0x10`/`0x11`/`0x12`
+    /// press (spec §1, last row), and equally on its own side-specific code
+    /// if the hook ever reports that; a generic `0x10`-`0x12` binding fires
+    /// on either side. Two codes of the same role deliberately *do* match
+    /// (`0xA2` Left Ctrl and `0xA3` Right Ctrl both normalise to `0x11`, so
+    /// either side fires a Ctrl binding). Non-modifier codes pass through
+    /// unchanged on both sides, and different roles still never match
+    /// (`0xA2` Ctrl vs `0xA4` Alt normalise to `0x11` vs `0x12`).
     pub fn matches_key(&self, vk: u16) -> bool {
-        matches!(self, Self::Key { vk: bound, .. } if *bound == vk)
+        match self {
+            Self::Key { vk: bound, .. } => modifier_role_vk(*bound) == modifier_role_vk(vk),
+            // A chord is a set of inputs, matched only by the chord
+            // matcher — never by one key or button (spec §3).
+            Self::Mouse(_) | Self::Chord(_) => false,
+        }
     }
 
     /// Mouse hook comparison — likewise limited to the bound button.
     pub fn matches_mouse(&self, button: MouseButton) -> bool {
-        matches!(self, Self::Mouse(bound) if *bound == button)
+        match self {
+            Self::Mouse(bound) => *bound == button,
+            // A chord is matched only by the chord matcher (spec §3).
+            Self::Key { .. } | Self::Chord(_) => false,
+        }
     }
 
     /// Human-readable form for CLI output and the settings UI.
@@ -80,6 +106,7 @@ impl Binding {
         match self {
             Self::Key { vk, .. } => format!("key {vk:#04x}"),
             Self::Mouse(button) => format!("mouse {}", button.name()),
+            Self::Chord(chord) => chord.describe(),
         }
     }
 
@@ -90,6 +117,7 @@ impl Binding {
         match self {
             Self::Key { vk, .. } => key_name(*vk),
             Self::Mouse(button) => button_label(*button),
+            Self::Chord(chord) => chord.label(),
         }
     }
 
@@ -98,6 +126,7 @@ impl Binding {
         match self {
             Self::Key { .. } => "key",
             Self::Mouse(_) => "mouse",
+            Self::Chord(_) => "chord",
         }
     }
 
@@ -106,6 +135,10 @@ impl Binding {
         match self {
             Self::Key { .. } => None,
             Self::Mouse(button) => Some(button.name()),
+            Self::Chord(chord) => match chord.key {
+                Some(chord::ChordKey::Mouse(button)) => Some(button.name()),
+                _ => None,
+            },
         }
     }
 
@@ -114,6 +147,10 @@ impl Binding {
         match self {
             Self::Key { vk, .. } => Some(*vk),
             Self::Mouse(_) => None,
+            Self::Chord(chord) => match chord.key {
+                Some(chord::ChordKey::Key { vk, .. }) => Some(vk),
+                _ => None,
+            },
         }
     }
 
@@ -121,14 +158,31 @@ impl Binding {
     /// so a shortcut chord cannot bind its first key by accident; it waits
     /// for a real key. It is only about *capturing*: the settings window's
     /// on-screen keyboard can still bind the left/right Shift, Ctrl and Alt
-    /// keys (`0xA0..=0xA5`, what the hook reports) on purpose. Mouse buttons
-    /// are always bindable.
+    /// keys (`0xA0..=0xA5`) on purpose. Which form the hook actually reports
+    /// for them does not matter — [`Binding::matches_key`] normalises both
+    /// sides to the modifier role. Mouse buttons are always bindable.
     pub fn is_modifier(&self) -> bool {
         match self {
             // Shift, Control, Menu/Alt, LWin, RWin and their extended forms.
             Self::Key { vk, .. } => matches!(*vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5),
-            Self::Mouse(_) => false,
+            // A chord is a shortcut, not a modifier (spec §3).
+            Self::Mouse(_) | Self::Chord(_) => false,
         }
+    }
+}
+
+/// The modifier-role virtual-key code a left/right modifier key and its
+/// generic form share: `VK_LSHIFT`…`VK_RALT` (`0xA0..=0xA5`) and the generic
+/// `VK_SHIFT`/`VK_CONTROL`/`VK_MENU` (`0x10`/`0x11`/`0x12`) normalise to the
+/// same value, so [`Binding::matches_key`] applies it to *both* the bound
+/// code and the reported one and never has to guess which form the hook
+/// sends. Anything else passes through untouched.
+fn modifier_role_vk(vk: u16) -> u16 {
+    match vk {
+        0xA0 | 0xA1 => 0x10, // Left/Right Shift
+        0xA2 | 0xA3 => 0x11, // Left/Right Ctrl
+        0xA4 | 0xA5 => 0x12, // Left/Right Alt
+        other => other,
     }
 }
 
@@ -161,7 +215,9 @@ pub(crate) fn key_name(vk: u16) -> String {
         0x5D => "Context Menu".to_string(),
         0x90 => "Num Lock".to_string(),
         0x91 => "Scroll Lock".to_string(),
-        // Left/right modifiers (never bindable, but they have names).
+        // Left/right modifiers — bindable (`0xA0..=0xA5`, as the on-screen
+        // keyboard offers); `matches_key` normalises both sides, so a binding
+        // on either side fires whichever side is pressed. They have names.
         0xA0 => "Left Shift".to_string(),
         0xA1 => "Right Shift".to_string(),
         0xA2 => "Left Ctrl".to_string(),
@@ -252,6 +308,7 @@ pub trait InputSource {
 
 #[cfg(test)]
 mod tests {
+    use super::chord::{Chord, ChordKey, Modifiers, Side};
     use super::*;
 
     fn caps_lock() -> Binding {
@@ -259,6 +316,27 @@ mod tests {
             vk: 0x14,
             scan: 0x3a,
         }
+    }
+
+    fn ctrl_n() -> Binding {
+        Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        })
+    }
+
+    fn ctrl_shift() -> Binding {
+        Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                shift: Side::Any,
+                ..Default::default()
+            },
+            key: None,
+        })
     }
 
     // --- matching ---------------------------------------------------------
@@ -283,6 +361,160 @@ mod tests {
         assert!(
             !binding.matches_key(0x14),
             "key bindings ignore mouse buttons"
+        );
+    }
+
+    #[test]
+    fn a_left_or_right_modifier_key_matches_the_generic_press() {
+        // The on-screen keyboard offers 0xA0..=0xA5 as single keys while the
+        // hook may report the generic 0x10/0x11/0x12 for both sides (spec
+        // §1's last row). Both sides of the comparison are normalised, so
+        // every one of the six codes fires on its role's generic press *and*
+        // on its own side-specific code.
+        for (vk, generic) in [
+            (0xA0, 0x10), // Left Shift
+            (0xA1, 0x10), // Right Shift
+            (0xA2, 0x11), // Left Ctrl
+            (0xA3, 0x11), // Right Ctrl
+            (0xA4, 0x12), // Left Alt
+            (0xA5, 0x12), // Right Alt
+        ] {
+            let binding = Binding::Key { vk, scan: 0 };
+            assert!(
+                binding.matches_key(generic),
+                "vk {vk:#x} fires on the generic {generic:#x} press"
+            );
+            assert!(
+                binding.matches_key(vk),
+                "vk {vk:#x} also fires if the hook reports its own side-specific code"
+            );
+            assert!(
+                !binding.matches_key(0x41),
+                "vk {vk:#x} never fires on a plain key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_left_or_right_modifier_key_never_matches_another_roles_press() {
+        // Normalising both sides must not make every modifier look alike:
+        // each of the six codes only fires on the two codes (its own
+        // side-specific one and its role's generic one) of its own role.
+        for (vk, own) in [
+            (0xA0, 0x10),
+            (0xA1, 0x10),
+            (0xA2, 0x11),
+            (0xA3, 0x11),
+            (0xA4, 0x12),
+            (0xA5, 0x12),
+        ] {
+            let binding = Binding::Key { vk, scan: 0 };
+            for other in [0x10, 0x11, 0x12] {
+                if other == own {
+                    continue;
+                }
+                assert!(
+                    !binding.matches_key(other),
+                    "vk {vk:#x} must not fire on the other role {other:#x}"
+                );
+            }
+            // The two sides of a *different* role stay different, too.
+            let other_side = match vk {
+                0xA0 | 0xA1 => 0xA2,
+                0xA2 | 0xA3 => 0xA4,
+                _ => 0xA0,
+            };
+            assert!(
+                !binding.matches_key(other_side),
+                "vk {vk:#x} must not fire on the other role's side-specific {other_side:#x}"
+            );
+        }
+    }
+
+    // --- chords (spec §3: matched by the matcher, never as one input) ------
+
+    #[test]
+    fn a_chord_never_matches_as_a_single_key_or_button() {
+        let chord = ctrl_n();
+        assert!(
+            !chord.matches_key(0x4E),
+            "the final key alone is not the chord"
+        );
+        assert!(
+            !chord.matches_mouse(MouseButton::Left),
+            "nor is any mouse button"
+        );
+    }
+
+    #[test]
+    fn a_chord_is_not_a_bare_modifier() {
+        assert!(
+            !ctrl_shift().is_modifier(),
+            "a chord is a shortcut, not a modifier that cannot be held to talk"
+        );
+    }
+
+    #[test]
+    fn a_chord_reports_the_kind_and_final_vk_the_config_expects() {
+        assert_eq!(ctrl_n().kind_name(), "chord");
+        assert_eq!(ctrl_n().vk(), Some(0x4E));
+        assert_eq!(ctrl_shift().vk(), None, "modifier-only has no final key");
+        assert_eq!(
+            Binding::Chord(Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Any,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Mouse(MouseButton::Left)),
+            })
+            .vk(),
+            None,
+            "a mouse final member has no vk"
+        );
+    }
+
+    #[test]
+    fn a_chord_label_is_what_the_settings_window_shows() {
+        assert_eq!(ctrl_n().label(), "Ctrl+N");
+    }
+
+    #[test]
+    fn a_chord_describes_itself_field_by_field_for_the_cli() {
+        assert_eq!(
+            ctrl_n().describe(),
+            "chord ctrl=any shift=off alt=off win=off key=0x4e"
+        );
+        assert_eq!(
+            ctrl_shift().describe(),
+            "chord ctrl=any shift=any alt=off win=off",
+            "a modifier-only chord has no key field"
+        );
+    }
+
+    #[test]
+    fn a_chord_reports_a_mouse_button_only_when_it_is_the_final_member() {
+        let ctrl_left_mouse = Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Mouse(MouseButton::Left)),
+        });
+        assert_eq!(ctrl_left_mouse.button_name(), Some("left"));
+        assert_eq!(
+            ctrl_left_mouse.label(),
+            "Ctrl+Left mouse button",
+            "labels join members with a bare +"
+        );
+        assert_eq!(
+            ctrl_n().button_name(),
+            None,
+            "a keyed chord has no mouse button"
+        );
+        assert_eq!(
+            ctrl_shift().button_name(),
+            None,
+            "nor has a modifier-only chord"
         );
     }
 

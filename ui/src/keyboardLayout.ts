@@ -35,10 +35,12 @@ export function isSpacer(cell: Cell): cell is Spacer {
 /// tap on them opens the Start menu and they carry system shortcuts.
 ///
 /// Shift, Ctrl and Alt *can* be picked here — always as the left/right
-/// variant (0xA0–0xA5), which is what the low-level hook reports; the generic
-/// 0x10–0x12 codes never reach it, so a binding to one would never fire.
-/// ("Press any key" still skips all modifiers, so a shortcut chord cannot
-/// bind one by accident.)
+/// variant (0xA0–0xA5). Which form the low-level hook then reports for a
+/// press (that side-specific code, or the generic 0x10–0x12) is irrelevant:
+/// `matches_key` in crates/ptt-core/src/input/mod.rs normalises *both*
+/// sides of the comparison to the modifier role, so it matches either way
+/// and no such binding can silently never fire. ("Press any key" still
+/// skips all modifiers, so a shortcut chord cannot bind one by accident.)
 export function isBlockedVk(vk: number): boolean {
   return vk === 0x5b || vk === 0x5c;
 }

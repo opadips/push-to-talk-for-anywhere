@@ -487,6 +487,9 @@ impl Config {
                 self.binding.kind = "mouse".to_string();
                 self.binding.mouse_button = button.name().to_string();
             }
+            // Chords are not storable in the flat config fields yet, and
+            // capture cannot produce one — until it can, this is unreachable.
+            Binding::Chord(_) => unreachable!(),
         }
         self.binding.swallow = swallow;
     }
@@ -526,6 +529,8 @@ impl Config {
                 self.toggle.kind = "mouse".to_string();
                 self.toggle.mouse_button = button.name().to_string();
             }
+            // Same as `set_binding`: nothing produces a chord yet.
+            Some(Binding::Chord(_)) => unreachable!(),
         }
         self.toggle.swallow = swallow;
     }
