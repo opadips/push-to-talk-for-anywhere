@@ -671,4 +671,72 @@ mod tests {
         // Something the table does not know still says what it is.
         assert_eq!(Binding::Key { vk: 0xE8, scan: 0 }.label(), "Key 0xe8");
     }
+
+    // --- serde (the settings window's hand-mirrored `Captured` type) ------
+    //
+    // `ui/src/App.svelte` mirrors the wire shape of a captured `Binding` by
+    // hand: it has no generated types and no schema check, so a Rust-side
+    // change to this shape would break the UI silently and nothing would
+    // fail. These tests are the mirror's other half — they pin the exact
+    // JSON the UI parses, so CI fails the moment the shape drifts.
+
+    /// Assert the exact JSON the settings window receives, and that the same
+    /// JSON still parses back into the binding it came from.
+    fn assert_matches_the_ui_mirror(binding: Binding, expected: &str) {
+        let json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(
+            json, expected,
+            "the wire shape must not drift from the UI's `Captured` mirror"
+        );
+        assert_eq!(
+            serde_json::from_str::<Binding>(&json).unwrap(),
+            binding,
+            "the same JSON must parse back"
+        );
+    }
+
+    #[test]
+    fn a_keyed_chord_serializes_to_the_shape_the_settings_window_parses() {
+        assert_matches_the_ui_mirror(
+            Binding::Chord(Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Left,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Key { vk: 78, scan: 49 }),
+            }),
+            r#"{"Chord":{"modifiers":{"ctrl":"left","shift":"off","alt":"off","win":"off"},"key":{"Key":{"vk":78,"scan":49}}}}"#,
+        );
+    }
+
+    #[test]
+    fn a_modifier_only_chord_serializes_its_key_as_null() {
+        // `Ctrl+Shift` has no final member: the UI reads `key: null` and
+        // leaves `vk` and `mouse_button` empty (ui/src/App.svelte).
+        assert_matches_the_ui_mirror(
+            Binding::Chord(Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Any,
+                    shift: Side::Any,
+                    ..Default::default()
+                },
+                key: None,
+            }),
+            r#"{"Chord":{"modifiers":{"ctrl":"any","shift":"any","alt":"off","win":"off"},"key":null}}"#,
+        );
+    }
+
+    #[test]
+    fn a_mouse_ending_chord_serializes_its_button_as_the_final_member() {
+        assert_matches_the_ui_mirror(
+            Binding::Chord(Chord {
+                modifiers: Modifiers {
+                    ctrl: Side::Any,
+                    ..Default::default()
+                },
+                key: Some(ChordKey::Mouse(MouseButton::Left)),
+            }),
+            r#"{"Chord":{"modifiers":{"ctrl":"any","shift":"off","alt":"off","win":"off"},"key":{"Mouse":"Left"}}}"#,
+        );
+    }
 }

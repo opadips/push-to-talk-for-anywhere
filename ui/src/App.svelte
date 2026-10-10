@@ -11,13 +11,24 @@
   import { isShiftCtrlAltVk } from "./keyboardLayout";
 
   // --- shapes the Rust side serializes (plan §8, §9 M4) -------------------
+  // The four side words a chord stores for each modifier (spec §8): which
+  // side of that role must be held for the combination to fire.
+  type Side = "off" | "any" | "left" | "right";
+  type SideRole = "ctrl" | "shift" | "alt" | "win";
   type BindingConfig = {
     // `""` is the toggle's unbound state (its neutral state before the
-    // feature existed); the PTT binding is always "key" or "mouse".
-    kind: "" | "key" | "mouse";
+    // feature existed); the PTT binding is always "key", "mouse" or "chord".
+    kind: "" | "key" | "mouse" | "chord";
     vk: number;
     scan: number;
     mouse_button: string;
+    // Chord members — inert unless `kind === "chord"`, additive like every
+    // other new config field: a file from before chords existed loads with
+    // all four "off" (spec §8).
+    ctrl: Side;
+    shift: Side;
+    alt: Side;
+    win: Side;
     swallow: boolean;
   };
   type Config = {
@@ -42,8 +53,19 @@
     error: string | null;
   };
   type DeviceInfo = { id: string; name: string; is_default: boolean };
-  // serde's external tagging: {"Key": {...}} or {"Mouse": "X1"}
-  type Captured = { Key: { vk: number; scan: number } } | { Mouse: string };
+  // serde's external tagging: {"Key": {...}} or {"Mouse": "X1"} — or, since
+  // chords exist, {"Chord": {…}} where `key` is `null` for a modifier-only
+  // chord such as `Ctrl+Shift`, and each modifier records the exact side
+  // that was pressed (capture never softens it to "any", spec §7).
+  type Captured =
+    | { Key: { vk: number; scan: number } }
+    | { Mouse: string }
+    | {
+        Chord: {
+          modifiers: Record<SideRole, Side>;
+          key: { Key: { vk: number; scan: number } } | { Mouse: string } | null;
+        };
+      };
   // Which binding a running capture — or the on-screen keyboard picker —
   // will write to: the PTT key or the toggle key.
   type CaptureTarget = "ptt" | "toggle";
@@ -84,6 +106,57 @@
       form.toggle.swallow &&
       isShiftCtrlAltVk(form.toggle.vk),
   );
+
+  // What the swallow checkbox blocks (spec §9). For a plain key or button it
+  // is that key; for a chord only its *completing* member, and the wording
+  // has to follow the shape because the rest of the sentence is true of only
+  // some of them:
+  //
+  //  * a keyed chord (`Ctrl+N`): the final key's press, the repeats while it
+  //    is held and its release are blocked, while the modifiers keep reaching
+  //    other programs — `Ctrl+C` still works;
+  //  * a mouse-ending chord: the same, with the mouse button in place of the
+  //    key;
+  //  * a modifier-only chord (`Ctrl+Shift`): there is no separate final
+  //    member, so the LAST modifier pressed completes the chord and is the
+  //    one that gets blocked. The earlier modifier's press and release are
+  //    still forwarded — claiming the whole combination is blocked would be
+  //    false.
+  function chordSwallowCaption(
+    bound: BindingConfig,
+    who: "the" | "the toggle's",
+  ): string {
+    if (bound.vk === 0 && bound.mouse_button === "") {
+      return (
+        `Also block ${who} whole combination from other applications — with a ` +
+        "modifier-only combination the last modifier you press is blocked, press " +
+        "and release, while the earlier ones still reach other applications."
+      );
+    }
+    const finalMember =
+      bound.mouse_button !== "" ? "final mouse button" : "final key";
+    const phases =
+      bound.mouse_button !== ""
+        ? "its press and its release are blocked"
+        : "its press, the repeats while it is held, and its release are blocked";
+    return (
+      `Also block ${who} ${finalMember} from other applications — ${phases}, but the ` +
+      "modifiers still reach other programs (Ctrl+C keeps working)."
+    );
+  }
+
+  let swallowCaption = $derived.by(() => {
+    if (!form) return "Also block the key from other applications";
+    return form.binding.kind === "chord"
+      ? chordSwallowCaption(form.binding, "the")
+      : "Also block the key from other applications";
+  });
+  let toggleSwallowCaption = $derived.by(() => {
+    if (!form) return "Also block the toggle key from other applications";
+    return form.toggle.kind === "chord"
+      ? chordSwallowCaption(form.toggle, "the toggle's")
+      : "Also block the toggle key from other applications";
+  });
 
   let stateLabel = $derived(
     !status || !status.running
@@ -130,7 +203,7 @@
 
   onDestroy(() => {
     unlisten?.();
-    window.removeEventListener("keydown", onCaptureKey, true);
+    stopCaptureListeners();
   });
 
   async function labelFor(config: Config): Promise<string> {
@@ -181,16 +254,21 @@
 
   // --- "press any key" (plan §9 M4) --------------------------------------
   //
-  // Two listeners race, and the first answer wins:
+  // Two listeners can answer, and the first one to do so wins:
   //
-  //  * KEYS are read by this page. While a capture is running the settings
-  //    window is the one that has the keyboard focus, so a plain DOM
+  //  * PLAIN KEYS are read by this page. While a capture is running the
+  //    settings window is the one that has the keyboard focus, so a plain DOM
   //    `keydown` always sees the press. The global low-level hook cannot be
   //    relied on for this: it was observed not to deliver key presses while
   //    WebView2 owned the focus, and the raw-input fallback added for that
   //    rejected every key report (see hook.rs).
-  //  * MOUSE BUTTONS come from the backend (`capture_binding`): the global
-  //    hook sees them anywhere on screen, including the side buttons.
+  //  * A MODIFIER-INITIATED SEQUENCE belongs to the backend alone
+  //    (`capture_binding`): it is the only side that sees which side of the
+  //    modifier moved, and its answer is a chord — or the correct discard of
+  //    a lone modifier. The page therefore stands down whenever a modifier
+  //    is held (see `heldModifiers`), leaving the backend to answer it.
+  //  * MOUSE BUTTONS also come from the backend: the global hook sees them
+  //    anywhere on screen, including the side buttons.
   //
   // WebView2 is Chromium on Windows, where `KeyboardEvent.keyCode` is the
   // Windows virtual-key code — the very number the hook reports as `vkCode`
@@ -203,10 +281,48 @@
   // listener (or a request we cancelled) is recognised and ignored.
   let captureId = 0;
 
+  // --- modifier state while a capture runs ---------------------------------
+  //
+  // `onCaptureKey` only ever answers with a *plain key*, so as long as a
+  // modifier is down the backend owns the sequence: it alone sees which side
+  // of the modifier moved, and it answers with a chord — or correctly
+  // discards a lone modifier. Answering here instead would turn every
+  // `Ctrl+N` into a bare `N`, and that is exactly what would happen on the
+  // machine the raw-input fallback exists for (key presses that never reach
+  // the hook): there the page answers without any thread wakeup while the
+  // backend still has to run hook thread → channel → session loop → command
+  // → IPC, so the page always wins the race.
+  //
+  // The keys the page sees itself, so a modifier pressed before "Change" was
+  // clicked (which produced no `keydown` we could have seen) is caught by
+  // `KeyboardEvent.getModifierState` instead — see `onCaptureKey`.
+  const heldModifiers = new Set<number>();
+  // The reactive half of `heldModifiers` — only the capture hint reads it.
+  let modifierHeld = $state(false);
+
+  function startCaptureListeners() {
+    heldModifiers.clear();
+    modifierHeld = false;
+    window.addEventListener("keydown", onCaptureKey, true);
+    window.addEventListener("keyup", onCaptureKeyUp, true);
+    // A modifier released while the window is not focused never sends its
+    // `keyup` here; a stale entry would keep the page from ever answering
+    // again, so the set is dropped wholesale instead.
+    window.addEventListener("blur", onCaptureBlur);
+  }
+
+  function stopCaptureListeners() {
+    window.removeEventListener("keydown", onCaptureKey, true);
+    window.removeEventListener("keyup", onCaptureKeyUp, true);
+    window.removeEventListener("blur", onCaptureBlur);
+    heldModifiers.clear();
+    modifierHeld = false;
+  }
+
   function endCapture(cancelBackend: boolean) {
     captureId++;
     capturing = false;
-    window.removeEventListener("keydown", onCaptureKey, true);
+    stopCaptureListeners();
     // The backend capture is still armed: tell it to stand down, or the hook
     // would swallow the next key / mouse button the user presses anywhere.
     if (cancelBackend) invoke("cancel_capture").catch(() => {});
@@ -215,14 +331,41 @@
   async function applyCaptured(captured: Captured, target: CaptureTarget) {
     if (!form) return;
     const bound = target === "toggle" ? form.toggle : form.binding;
-    if ("Key" in captured) {
+    if ("Chord" in captured) {
+      // A press-and-hold capture: `kind = "chord"` plus the four side
+      // fields, written exactly as `config.toml` stores them (spec §8).
+      const { modifiers, key } = captured.Chord;
+      bound.kind = "chord";
+      bound.ctrl = modifiers.ctrl;
+      bound.shift = modifiers.shift;
+      bound.alt = modifiers.alt;
+      bound.win = modifiers.win;
+      if (!key) {
+        // A modifier-only chord (`Ctrl+Shift`) has no final member: `vk`
+        // and `mouse_button` both stay empty (spec §8).
+        bound.vk = 0;
+        bound.scan = 0;
+        bound.mouse_button = "";
+      } else if ("Key" in key) {
+        bound.vk = key.Key.vk;
+        bound.scan = key.Key.scan;
+        bound.mouse_button = "";
+      } else {
+        // A final mouse button lives in `mouse_button`, with `vk` zeroed.
+        bound.mouse_button = String(key.Mouse).toLowerCase();
+        bound.vk = 0;
+        bound.scan = 0;
+      }
+    } else if ("Key" in captured) {
       bound.kind = "key";
       bound.vk = captured.Key.vk;
       bound.scan = captured.Key.scan;
       bound.mouse_button = "";
+      clearSides(bound);
     } else {
       bound.kind = "mouse";
       bound.mouse_button = String(captured.Mouse).toLowerCase();
+      clearSides(bound);
     }
     if (target === "toggle") {
       toggleLabel = await toggleLabelFor(form);
@@ -236,8 +379,70 @@
   // on mount or after a save).
   function clearToggle() {
     if (!form) return;
-    form.toggle = { kind: "", vk: 0, scan: 0, mouse_button: "", swallow: true };
+    form.toggle = {
+      kind: "",
+      vk: 0,
+      scan: 0,
+      mouse_button: "",
+      ctrl: "off",
+      shift: "off",
+      alt: "off",
+      win: "off",
+      swallow: true,
+    };
     toggleLabel = "Not set";
+  }
+
+  // --- chord side selectors (spec §9) --------------------------------------
+  //
+  // Capture records the exact side a modifier was pressed on, so a binding
+  // captured with the right Ctrl (`Right Ctrl+N`) does not fire on the left
+  // one. These four selectors are the one place the user can loosen a pin
+  // back to `Any` (or drop a modifier entirely) without rebinding.
+
+  const SIDE_ROLES: { role: SideRole; caption: string }[] = [
+    { role: "ctrl", caption: "Ctrl" },
+    { role: "shift", caption: "Shift" },
+    { role: "alt", caption: "Alt" },
+    { role: "win", caption: "Win" },
+  ];
+
+  // Drop a binding back to a plain key or button: clear the chord side
+  // fields too, exactly as `Config::set_binding` does (`clear_chord_fields`)
+  // — otherwise a later chord would silently inherit stale sides.
+  function clearSides(bound: BindingConfig) {
+    bound.ctrl = "off";
+    bound.shift = "off";
+    bound.alt = "off";
+    bound.win = "off";
+  }
+
+  // One selector changed: write the side into the draft, then refetch the
+  // label — it comes from Rust (`Binding::label`) and is never rebuilt here.
+  async function setSide(target: CaptureTarget, role: SideRole, value: string) {
+    if (!form) return;
+    const bound = target === "toggle" ? form.toggle : form.binding;
+    bound[role] = value as Side;
+    if (target === "toggle") {
+      toggleLabel = await toggleLabelFor(form);
+    } else {
+      label = await labelFor(form);
+    }
+  }
+
+  // `Chord::is_valid` on the draft: a chord with no final member needs at
+  // least two modifiers, and the engine falls back to the default binding
+  // the moment it is saved — say so while the user can still fix it.
+  function chordIsUnusable(bound: BindingConfig): boolean {
+    const modifiers = [bound.ctrl, bound.shift, bound.alt, bound.win].filter(
+      (side) => side !== "off",
+    ).length;
+    return (
+      bound.kind === "chord" &&
+      bound.vk === 0 &&
+      bound.mouse_button === "" &&
+      modifiers < 2
+    );
   }
 
   function onCaptureKey(event: KeyboardEvent) {
@@ -248,14 +453,53 @@
     // The press that clicked "Change" may still be auto-repeating.
     if (event.repeat || event.isComposing) return;
     const vk = event.keyCode;
-    // A bare modifier is skipped here (and by the core's capture): the page
-    // cannot tell left from right, and a chord must not bind its first key.
-    // Shift/Ctrl/Alt are bound from the on-screen keyboard instead.
-    if (!vk || vk === VK_IME || MODIFIER_VKS.has(vk)) return;
+    if (MODIFIER_VKS.has(vk)) {
+      heldModifiers.add(vk);
+      modifierHeld = true;
+      return;
+    }
+    if (!vk || vk === VK_IME) return;
+    // A modifier-initiated sequence is the backend's, not this page's: only
+    // the hook sees which side of a modifier moved, and its accumulator
+    // answers with a chord — or correctly discards a lone modifier. This
+    // page can only ever answer with a plain key (spec §7), so answering
+    // while a modifier is down would silently downgrade every `Ctrl+N` to a
+    // bare `N` — and on the machine the raw-input fallback exists for the
+    // page *always* wins that race (see `heldModifiers`). `getModifierState`
+    // covers a modifier held before "Change" was clicked, whose `keydown`
+    // no listener here ever saw.
+    if (heldModifiers.size > 0 || modifierHeldOn(event)) return;
     endCapture(true);
     // The page has no scan code. It is stored but never matched on — the
     // hook compares `vk` only — and 0 passes the config validation.
     void applyCaptured({ Key: { vk, scan: 0 } }, captureTarget);
+  }
+
+  // Whether a modifier is currently down, as the browser itself reports it
+  // on this event — the state our own listeners can only see from the moment
+  // the capture started.
+  function modifierHeldOn(event: KeyboardEvent): boolean {
+    return (
+      event.getModifierState("Control") ||
+      event.getModifierState("Shift") ||
+      event.getModifierState("Alt") ||
+      event.getModifierState("Meta")
+    );
+  }
+
+  // Releases matter as much as presses: without them a Ctrl released after
+  // the capture ended would leave the set stuck and the page never answering
+  // again (see `stopCaptureListeners`).
+  function onCaptureKeyUp(event: KeyboardEvent) {
+    const vk = event.keyCode;
+    if (!MODIFIER_VKS.has(vk)) return;
+    heldModifiers.delete(vk);
+    modifierHeld = heldModifiers.size > 0;
+  }
+
+  function onCaptureBlur() {
+    heldModifiers.clear();
+    modifierHeld = false;
   }
 
   async function capture(target: CaptureTarget) {
@@ -263,7 +507,7 @@
     const id = ++captureId;
     captureTarget = target;
     capturing = true;
-    window.addEventListener("keydown", onCaptureKey, true);
+    startCaptureListeners();
     try {
       const captured = await invoke<Captured>("capture_binding");
       if (id !== captureId) return; // the page already answered (or cancelled)
@@ -332,6 +576,35 @@
     <div class="banner">{notice}</div>
   {/if}
 
+  {#snippet holdHint()}
+    <p class="hold-hint">
+      A modifier is held — press the rest of your combination to bind it. To bind a single key
+      instead, release the modifier first and then press the key.
+    </p>
+  {/snippet}
+
+  {#snippet sideSelectors(bound: BindingConfig, target: CaptureTarget)}
+    <div
+      class="sides"
+      title="Which side of each modifier must be held for this combination to fire"
+    >
+      {#each SIDE_ROLES as entry (entry.role)}
+        <label class="side">
+          <span>{entry.caption}</span>
+          <select
+            value={bound[entry.role]}
+            onchange={(event) => setSide(target, entry.role, event.currentTarget.value)}
+          >
+            <option value="off">Off</option>
+            <option value="any">Any</option>
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </label>
+      {/each}
+    </div>
+  {/snippet}
+
   {#if form}
     <section>
       <h2>Hotkey</h2>
@@ -350,9 +623,21 @@
           </button>
         </span>
       </div>
+      {#if capturing && captureTarget === "ptt" && modifierHeld}
+        {@render holdHint()}
+      {/if}
+      {#if form.binding.kind === "chord"}
+        {@render sideSelectors(form.binding, "ptt")}
+        {#if chordIsUnusable(form.binding)}
+          <p class="warn">
+            This combination has no final key and fewer than two modifiers, so it is not a valid
+            binding — the hotkey falls back to the default key when you save.
+          </p>
+        {/if}
+      {/if}
       <label class="check">
         <input type="checkbox" bind:checked={form.binding.swallow} />
-        Also block the key from other applications
+        {swallowCaption}
       </label>
       {#if blocksModifier}
         <p class="warn">
@@ -379,13 +664,25 @@
           <button onclick={clearToggle} disabled={capturing || busy}>Clear</button>
         </span>
       </div>
+      {#if capturing && captureTarget === "toggle" && modifierHeld}
+        {@render holdHint()}
+      {/if}
+      {#if form.toggle.kind === "chord"}
+        {@render sideSelectors(form.toggle, "toggle")}
+        {#if chordIsUnusable(form.toggle)}
+          <p class="warn">
+            This combination has no final key and fewer than two modifiers, so it is not a valid
+            binding — the toggle is left unbound when you save.
+          </p>
+        {/if}
+      {/if}
       <label class="check">
         <input
           type="checkbox"
           bind:checked={form.toggle.swallow}
           disabled={form.toggle.kind === ""}
         />
-        Also block the toggle key from other applications
+        {toggleSwallowCaption}
       </label>
       {#if blocksToggleModifier}
         <p class="warn">
@@ -659,6 +956,44 @@
     font-size: 0.9rem;
     color: #c9cdd2;
     margin-top: 0.7rem;
+  }
+  .hold-hint {
+    margin: 0.6rem 0 0;
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    background: #16202b;
+    border: 1px solid #2c3d51;
+    color: #c4d6e8;
+    font-size: 0.82rem;
+    line-height: 1.35;
+  }
+  .sides {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem 1.1rem;
+    margin-top: 0.7rem;
+  }
+  .side {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: #c9cdd2;
+  }
+  .side > span {
+    min-width: 3rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9aa0a6;
+  }
+  .side select {
+    flex: 0 0 auto;
+    max-width: none;
+    padding: 0.3rem 0.45rem;
+    font-size: 0.85rem;
   }
   .field {
     display: flex;
