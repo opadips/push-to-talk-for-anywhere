@@ -235,6 +235,8 @@ static LAST_WORKER: AtomicU32 = AtomicU32::new(0);
 /// Last stall-warning log tick — one global gate for all devices, via
 /// [`maybe_stall_warning`].
 static LAST_STALL_LOG: AtomicU32 = AtomicU32::new(0);
+/// Which call the hook thread last stepped into, as a [`HookPhase`] code.
+static HOOK_PHASE: AtomicU32 = AtomicU32::new(HookPhase::Unknown.code());
 
 /// Record a keyboard hook callback beat.
 pub fn note_keyboard_cb() {
@@ -261,6 +263,19 @@ pub fn note_worker_gone() {
     LAST_WORKER.store(0, Ordering::Relaxed);
 }
 
+/// Record the call the hook thread is stepping into (spec §4). A relaxed
+/// store and no I/O, so it is as safe inside a hook callback as a beat.
+pub fn note_hook_phase(phase: HookPhase) {
+    HOOK_PHASE.store(phase.code(), Ordering::Relaxed);
+}
+
+/// What the hook thread last recorded, for the watchdog to report when the
+/// heartbeat stops. Relaxed: the reader only wants the most recent step,
+/// never a value synchronized across threads.
+pub fn current_hook_phase() -> HookPhase {
+    HookPhase::from_code(HOOK_PHASE.load(Ordering::Relaxed))
+}
+
 /// Zero every beat and the stall gate (spec §4).
 pub fn reset() {
     LAST_KEYBOARD_CB.store(0, Ordering::Relaxed);
@@ -268,6 +283,7 @@ pub fn reset() {
     LAST_HOOK_THREAD.store(0, Ordering::Relaxed);
     LAST_WORKER.store(0, Ordering::Relaxed);
     LAST_STALL_LOG.store(0, Ordering::Relaxed);
+    HOOK_PHASE.store(HookPhase::Unknown.code(), Ordering::Relaxed);
 }
 
 /// A [`Snapshot`] of the recorded beats, taken at [`tick_ms`].
@@ -458,6 +474,87 @@ fn percent(part: u64, whole: u64) -> u32 {
         return 0;
     }
     (part.saturating_mul(100) / whole).min(100) as u32
+}
+
+/// Where the hook thread was standing when the watchdog last heard from it
+/// (spec §4). The wait-state probe says a stalled thread is *blocked*; this
+/// says blocked **in which call** — the evidence leaves two candidates, our
+/// own lock and the system-wide hook chain, and they imply different fixes.
+/// Written with a plain relaxed store, so it costs the callback no more than
+/// the beats already do and does no I/O on the input path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum HookPhase {
+    /// Nothing recorded — a reset session, or a thread that never ran.
+    Unknown = 0,
+    /// Parked in `GetMessageW`. The one-second heartbeat timer fires from
+    /// here, so a stall reported in this phase means the timer stopped
+    /// rather than the thread.
+    Pumping = 1,
+    /// A low-level callback has been entered; no lock taken yet.
+    CallbackEntered = 2,
+    /// About to take the shared binding mutex — the phase that means
+    /// *another thread* is holding it.
+    AcquiringShared = 3,
+    /// Holding the shared binding mutex, running the rest of the callback.
+    HoldingShared = 4,
+    /// Inside `CallNextHookEx`, waiting on the next hook in the
+    /// system-wide low-level chain, which can belong to another
+    /// application (an overlay, a game's anti-cheat).
+    CallingNextHook = 5,
+    /// Inside the notify window procedure (resume, unlock, raw input).
+    NotifyWindow = 6,
+}
+
+impl HookPhase {
+    /// The value that goes into the phase atomic.
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
+
+    /// Decode a stored code. An unrecognized one reads as `Unknown` rather
+    /// than being forced into a phase it may not be — a wrong location in
+    /// the stall log would send the investigation somewhere it is not.
+    pub fn from_code(code: u32) -> Self {
+        match code {
+            1 => HookPhase::Pumping,
+            2 => HookPhase::CallbackEntered,
+            3 => HookPhase::AcquiringShared,
+            4 => HookPhase::HoldingShared,
+            5 => HookPhase::CallingNextHook,
+            6 => HookPhase::NotifyWindow,
+            _ => HookPhase::Unknown,
+        }
+    }
+
+    /// The spec §4 line: where the thread stood when the watchdog noticed
+    /// it had stopped pumping, and why that spot matters.
+    pub fn message(&self) -> String {
+        match self {
+            HookPhase::Unknown => "hook-thread phase: the hook thread recorded no location — it \
+                                   stopped before its first step, or was reset"
+                .to_string(),
+            HookPhase::Pumping => "hook-thread phase: parked in GetMessageW — the heartbeat timer \
+                                   fires from here, so the timer itself stopped"
+                .to_string(),
+            HookPhase::CallbackEntered => "hook-thread phase: inside a hook callback but before \
+                                           taking any lock — nothing there can wait"
+                .to_string(),
+            HookPhase::AcquiringShared => "hook-thread phase: waiting for the shared binding \
+                                           mutex — another thread is holding it"
+                .to_string(),
+            HookPhase::HoldingShared => "hook-thread phase: holding the shared binding mutex and \
+                                         running the callback"
+                .to_string(),
+            HookPhase::CallingNextHook => "hook-thread phase: inside CallNextHookEx — waiting on \
+                                           the next hook in the system-wide chain, which can be \
+                                           another application"
+                .to_string(),
+            HookPhase::NotifyWindow => "hook-thread phase: inside the notify window procedure \
+                                        (resume, unlock, or raw input)"
+                .to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -886,5 +983,73 @@ mod tests {
         .message();
         assert!(starved.contains("starved of CPU time"), "{starved}");
         assert!(starved.contains("priority would help"), "{starved}");
+    }
+
+    #[test]
+    fn hook_phase_round_trips_every_variant_through_the_atomic() {
+        for phase in [
+            HookPhase::Unknown,
+            HookPhase::Pumping,
+            HookPhase::CallbackEntered,
+            HookPhase::AcquiringShared,
+            HookPhase::HoldingShared,
+            HookPhase::CallingNextHook,
+            HookPhase::NotifyWindow,
+        ] {
+            assert_eq!(
+                HookPhase::from_code(phase.code()),
+                phase,
+                "{phase:?} must survive the trip through the atomic"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_phase_calls_an_unrecorded_code_unknown() {
+        // A freshly reset (or never written) atomic must not claim a
+        // location: the stall line would otherwise name a call the thread
+        // is not in, which is worse than admitting we do not know.
+        assert_eq!(
+            HookPhase::from_code(0),
+            HookPhase::Unknown,
+            "code 0 is the reset value"
+        );
+        assert_eq!(
+            HookPhase::from_code(u32::MAX),
+            HookPhase::Unknown,
+            "a code no writer produced must not name a phase"
+        );
+    }
+
+    #[test]
+    fn hook_phase_messages_split_the_two_call_sites_the_probe_exists_to_split() {
+        // (a) waiting on our own lock, held by someone else.
+        let lock = HookPhase::AcquiringShared.message();
+        assert!(lock.contains("mutex"), "{lock}");
+        assert!(lock.contains("another thread"), "{lock}");
+
+        // (b) waiting on the next hook in the system-wide chain.
+        let next = HookPhase::CallingNextHook.message();
+        assert!(next.contains("CallNextHookEx"), "{next}");
+        assert!(next.contains("another application"), "{next}");
+
+        // Every phase must read differently, or the line cannot localize.
+        let all = [
+            HookPhase::Unknown,
+            HookPhase::Pumping,
+            HookPhase::CallbackEntered,
+            HookPhase::AcquiringShared,
+            HookPhase::HoldingShared,
+            HookPhase::CallingNextHook,
+            HookPhase::NotifyWindow,
+        ];
+        for (i, phase) in all.iter().enumerate() {
+            let message = phase.message();
+            assert!(!message.is_empty(), "{phase:?} must say something");
+            assert!(
+                all[i + 1..].iter().all(|other| other.message() != message),
+                "{phase:?} must not share its message with any later phase"
+            );
+        }
     }
 }

@@ -337,6 +337,10 @@ unsafe fn install_hooks() -> Result<(HHOOK, HHOOK)> {
 unsafe fn message_loop() {
     let mut msg = MSG::default();
     loop {
+        // Where the thread stands (spec §4): parked here, the one-second
+        // heartbeat timer can still fire, so a stall reported in this phase
+        // means the timer stopped rather than the thread.
+        diagnostics::note_hook_phase(diagnostics::HookPhase::Pumping);
         // 0 means WM_QUIT, negative means an error: either way, stop.
         if unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 <= 0 {
             break;
@@ -396,6 +400,14 @@ fn watchdog(stop_rx: Receiver<()>) {
                         tracing::warn!("{cause_message}");
                     }
                 }
+
+                // ... which call it was standing in (spec §4): the
+                // wait-state probe says *blocked*; this says blocked in
+                // *which* call — our own mutex or the system-wide hook
+                // chain — and the two imply different fixes.
+                let phase_message = diagnostics::current_hook_phase().message();
+                diagnostics::record_finding(&phase_message);
+                tracing::warn!("{phase_message}");
             }
         }
         previous = current;
@@ -705,6 +717,9 @@ unsafe extern "system" fn notify_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // Every message this window receives is handled here (spec §4), so a
+    // stall in this phase localizes to the window procedure as a whole.
+    diagnostics::note_hook_phase(diagnostics::HookPhase::NotifyWindow);
     // A raw keyboard report for an armed capture (bug 3): deliver it the
     // same way the low-level hook branch does, then stop listening again —
     // whichever reporter sees the press first wins, the other finds the
@@ -749,6 +764,21 @@ fn emit(shared: &mut Shared, event: InputEvent) {
     }
 }
 
+/// Forward to the next hook in the system-wide chain with the phase marked
+/// (spec §4). This is the one call inside a low-level callback that can wait
+/// on *another application's* hook — an overlay, a game's anti-cheat — so
+/// the stall probe has to see the thread enter it. The phase is saved and
+/// restored around the call because two of the sites run while holding the
+/// shared mutex, and a stall later in the callback must not still read as
+/// "inside CallNextHookEx".
+unsafe fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let previous = diagnostics::current_hook_phase();
+    diagnostics::note_hook_phase(diagnostics::HookPhase::CallingNextHook);
+    let result = unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    diagnostics::note_hook_phase(previous);
+    result
+}
+
 /// `WH_KEYBOARD_LL` measuring wrapper (spec §4 D1).
 ///
 /// Records a callback beat on every entry — including `code < 0` — then times
@@ -758,6 +788,7 @@ fn emit(shared: &mut Shared, event: InputEvent) {
 /// it never rehooks, reprioritises, or changes what the hook does.
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     diagnostics::note_keyboard_cb();
+    diagnostics::note_hook_phase(diagnostics::HookPhase::CallbackEntered);
     if code < 0 {
         return unsafe { keyboard_proc_inner(code, wparam, lparam) };
     }
@@ -785,7 +816,7 @@ unsafe extern "system" fn keyboard_proc_inner(
         "keyboard hook callback alive (first keyboard event)",
     );
     if code < 0 {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
     let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
     // Never act on synthetic input (plan §7) — otherwise our own swallow
@@ -795,19 +826,24 @@ unsafe extern "system" fn keyboard_proc_inner(
             &KEYBOARD_FIRST_INJECTED,
             "keyboard hook sees synthetic (injected) input — first of possibly many",
         );
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
 
     let message = wparam.0 as u32;
     let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
     let released = matches!(message, WM_KEYUP | WM_SYSKEYUP);
     if !pressed && !released {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
     let vk = info.vkCode as u16;
     let scan = info.scanCode as u16;
 
+    // The one wait this callback can do on *our own* state (spec §4): mark
+    // the approach, so a stall here reads as contention on the mutex rather
+    // than as the hook chain beyond us.
+    diagnostics::note_hook_phase(diagnostics::HookPhase::AcquiringShared);
     let mut shared = shared();
+    diagnostics::note_hook_phase(diagnostics::HookPhase::HoldingShared);
 
     // "Press a key to bind" mode: the input becomes the binding and never
     // reaches another window (plan §4). Only a *press* counts: the release
@@ -829,7 +865,7 @@ unsafe extern "system" fn keyboard_proc_inner(
         .is_some_and(|binding| binding.matches_key(vk));
     let toggle = shared.toggle.is_some_and(|toggle| toggle.matches_key(vk));
     if !ptt && !toggle {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
 
     let mut swallowed = false;
@@ -873,7 +909,7 @@ unsafe extern "system" fn keyboard_proc_inner(
     if swallowed {
         return LRESULT(1);
     }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    unsafe { call_next(code, wparam, lparam) }
 }
 
 /// `WH_MOUSE_LL` measuring wrapper (spec §4 D1) — the mouse twin of
@@ -881,6 +917,7 @@ unsafe extern "system" fn keyboard_proc_inner(
 /// Log-only.
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     diagnostics::note_mouse_cb();
+    diagnostics::note_hook_phase(diagnostics::HookPhase::CallbackEntered);
     if code < 0 {
         return unsafe { mouse_proc_inner(code, wparam, lparam) };
     }
@@ -904,11 +941,11 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
         "mouse hook callback alive (first mouse event)",
     );
     if code < 0 {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
     let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     if info.flags & LLMHF_INJECTED != 0 {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
 
     let message = wparam.0 as u32;
@@ -921,7 +958,7 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
         WM_LBUTTONUP | WM_MBUTTONUP | WM_RBUTTONUP | WM_XBUTTONUP
     );
     if !pressed && !released {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
 
     // For the X buttons the high word of mouseData holds which one it was.
@@ -932,12 +969,14 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
         WM_XBUTTONDOWN | WM_XBUTTONUP => match (info.mouseData >> 16) as u16 {
             XBUTTON1 => MouseButton::X1,
             XBUTTON2 => MouseButton::X2,
-            _ => return unsafe { CallNextHookEx(None, code, wparam, lparam) },
+            _ => return unsafe { call_next(code, wparam, lparam) },
         },
-        _ => return unsafe { CallNextHookEx(None, code, wparam, lparam) },
+        _ => return unsafe { call_next(code, wparam, lparam) },
     };
 
+    diagnostics::note_hook_phase(diagnostics::HookPhase::AcquiringShared);
     let mut shared = shared();
+    diagnostics::note_hook_phase(diagnostics::HookPhase::HoldingShared);
 
     if let Some(tx) = shared.capture_tx.take() {
         let _ = tx.send(Binding::Mouse(button));
@@ -953,7 +992,7 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
         .toggle
         .is_some_and(|toggle| toggle.matches_mouse(button));
     if !ptt && !toggle {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return unsafe { call_next(code, wparam, lparam) };
     }
 
     let mut swallowed = false;
@@ -994,7 +1033,7 @@ unsafe extern "system" fn mouse_proc_inner(code: i32, wparam: WPARAM, lparam: LP
     if swallowed {
         return LRESULT(1);
     }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    unsafe { call_next(code, wparam, lparam) }
 }
 
 #[cfg(test)]
