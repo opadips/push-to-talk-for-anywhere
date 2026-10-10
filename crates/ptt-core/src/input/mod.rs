@@ -7,6 +7,8 @@
 #[cfg(windows)]
 pub mod hook;
 
+pub mod chord;
+
 use crate::error::{Error, Result};
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -87,13 +89,7 @@ impl Binding {
     pub fn label(&self) -> String {
         match self {
             Self::Key { vk, .. } => key_name(*vk),
-            Self::Mouse(button) => match button {
-                MouseButton::Left => "Left mouse button".to_string(),
-                MouseButton::Right => "Right mouse button".to_string(),
-                MouseButton::Middle => "Middle mouse button".to_string(),
-                MouseButton::X1 => "Mouse button 4 (back)".to_string(),
-                MouseButton::X2 => "Mouse button 5 (forward)".to_string(),
-            },
+            Self::Mouse(button) => button_label(*button),
         }
     }
 
@@ -138,7 +134,7 @@ impl Binding {
 
 /// Virtual-key name for [`Binding::label`] (plan §9 M4 shows what the user
 /// pressed). Unknown codes fall back to the hex code the CLI prints.
-fn key_name(vk: u16) -> String {
+pub(crate) fn key_name(vk: u16) -> String {
     match vk {
         0x08 => "Backspace".to_string(),
         0x09 => "Tab".to_string(),
@@ -197,6 +193,19 @@ fn key_name(vk: u16) -> String {
         0x6F => "Numpad /".to_string(),
         0x70..=0x87 => format!("F{}", vk - 0x6F),
         _ => format!("Key {vk:#04x}"),
+    }
+}
+
+/// The settings-window name of a mouse button for [`Binding::label`] and
+/// [`chord::Chord::label`] (plan §9 M4's "press any key": the wording stays
+/// identical wherever a mouse button is named).
+pub(crate) fn button_label(button: MouseButton) -> String {
+    match button {
+        MouseButton::Left => "Left mouse button".to_string(),
+        MouseButton::Right => "Right mouse button".to_string(),
+        MouseButton::Middle => "Middle mouse button".to_string(),
+        MouseButton::X1 => "Mouse button 4 (back)".to_string(),
+        MouseButton::X2 => "Mouse button 5 (forward)".to_string(),
     }
 }
 
