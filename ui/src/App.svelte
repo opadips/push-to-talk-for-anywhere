@@ -8,7 +8,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import VirtualKeyboard from "./VirtualKeyboard.svelte";
-  import { isShiftCtrlAltVk } from "./keyboardLayout";
+  import { isShiftCtrlAltVk, type PickedBinding } from "./keyboardLayout";
 
   // --- shapes the Rust side serializes (plan §8, §9 M4) -------------------
   // The four side words a chord stores for each modifier (spec §8): which
@@ -524,10 +524,12 @@
 
   // --- the on-screen keyboard ---------------------------------------------
   //
-  // The same result as pressing the key, reached by clicking it: the picker
-  // hands back a virtual-key code and the draft binding changes exactly as it
-  // does after "press any key". (There is no scan code to give — it is stored
-  // but never matched on, see `onCaptureKey`.)
+  // The same result as pressing the key (or holding a modifier and pressing
+  // it), reached by clicking: the picker hands back either a plain key or a
+  // complete chord — the modifiers armed on the board plus the key that
+  // completes them — and the draft binding changes exactly as it does after
+  // "press any key" or a captured combination. (There is no scan code to
+  // give — it is stored but never matched on, see `onCaptureKey`.)
   function openPicker(target: CaptureTarget, event: MouseEvent) {
     if (!form || capturing) return;
     pickerTarget = target;
@@ -541,9 +543,9 @@
     queueMicrotask(() => pickerOpener?.focus());
   }
 
-  async function pickKey(vk: number) {
+  async function pickKey(picked: PickedBinding) {
     closePicker();
-    await applyCaptured({ Key: { vk, scan: 0 } }, pickerTarget);
+    await applyCaptured(picked, pickerTarget);
   }
 
   let flashTimer: ReturnType<typeof setTimeout> | undefined;

@@ -1,9 +1,14 @@
 <script lang="ts">
   // The on-screen keyboard for the hotkey: click the key you want instead of
   // pressing it ("press any key" stays the way to bind a mouse button, or a
-  // key the keyboard on hand does not have). Picking a key reports its
-  // virtual-key code through `onpick` and the dialog closes; nothing is saved
-  // until the settings window's Save.
+  // key the keyboard on hand does not have). An ordinary key reports its
+  // virtual-key code through `onpick` and the dialog closes; a modifier key
+  // (Shift, Ctrl, Alt, Win) arms its role instead, and the next ordinary key
+  // completes a combination (`Ctrl+N`) — or, with two or more modifiers
+  // armed, "Use this combination" binds them on their own (`Ctrl+Shift`).
+  // One click reports one complete binding: the picker takes no part in the
+  // settings page's press-and-hold capture. Nothing is saved until the
+  // settings window's Save.
   import { onMount } from "svelte";
   import {
     MAIN_ROWS,
@@ -11,7 +16,11 @@
     NUMPAD,
     isBlockedVk,
     isSpacer,
+    modifierRole,
+    type ChordRole,
+    type ChordSide,
     type KeyDef,
+    type PickedBinding,
   } from "./keyboardLayout";
 
   let {
@@ -28,7 +37,7 @@
     currentLabel?: string;
     /// Which row opened the picker: the toggle-key copy names its binding.
     target?: "ptt" | "toggle";
-    onpick: (vk: number) => void;
+    onpick: (picked: PickedBinding) => void;
     onclose: () => void;
   } = $props();
 
@@ -36,14 +45,79 @@
   let hovered = $state<KeyDef | null>(null);
   let dialog: HTMLDivElement | undefined;
 
+  // Captions and join order of the four chord modifiers — the same order
+  // and spelling `Chord::label` on the Rust side joins them with `+`.
+  const ROLE_NAMES: Record<ChordRole, string> = {
+    ctrl: "Ctrl",
+    shift: "Shift",
+    alt: "Alt",
+    win: "Win",
+  };
+  const ROLE_ORDER: ChordRole[] = ["ctrl", "shift", "alt", "win"];
+
+  // Armed modifiers: clicking a modifier key toggles its role here, always
+  // as `Any` — which *side* must be held is the settings row's three-way
+  // selector, not this dialog's job. Arming is local to the dialog and is
+  // discarded with it; a chord is reported complete in one action (a
+  // completing key click, or "Use this combination").
+  let armed = $state<Record<ChordRole, boolean>>({
+    ctrl: false,
+    shift: false,
+    alt: false,
+    win: false,
+  });
+  let armedRoles = $derived(ROLE_ORDER.filter((role) => armed[role]));
+  let armedNames = $derived(armedRoles.map((role) => ROLE_NAMES[role]));
+  let armedLabel = $derived(armedNames.join("+"));
+
   // The grid works in quarter units, so every width in the layout (1.25,
   // 1.75, 2.25 … 6.25) is a whole number of columns and all rows line up.
   const COLS = MAIN_UNITS * 4;
   const span = (units: number) => Math.round(units * 4);
 
   function pick(key: KeyDef) {
+    const role = modifierRole(key.vk);
+    // A modifier arms (disarms) its own role and is never the key of the
+    // binding, so the engine can never receive a chord whose final member
+    // is a modifier — which `Chord::is_valid` rejects anyway.
+    if (role) {
+      armed[role] = !armed[role];
+      return;
+    }
+    // Defence in depth: the only blocked keys are the Windows keys, and
+    // those are modifiers caught above — arming Win is allowed, binding a
+    // Windows key on its own never is.
     if (isBlockedVk(key.vk)) return;
-    onpick(key.vk);
+    commit(key.vk);
+  }
+
+  // One click, one report: the chord the armed modifiers plus this key
+  // make — or the plain key alone when nothing is armed, exactly today's
+  // behaviour. The page has no scan code (stored but never matched on).
+  function commit(vk: number) {
+    onpick(
+      armedRoles.length > 0
+        ? { Chord: { modifiers: chordModifiers(), key: { Key: { vk, scan: 0 } } } }
+        : { Key: { vk, scan: 0 } },
+    );
+  }
+
+  // A modifier-only chord: at least two armed modifiers and no key — the
+  // engine engages it when the last of them goes down and releases it on
+  // the first one let go.
+  function commitModifierOnly() {
+    onpick({ Chord: { modifiers: chordModifiers(), key: null } });
+  }
+
+  // Armed is `Any` — the combination fires whichever side of the modifier
+  // is held. Unarmed is `Off` — the role must not be held at all.
+  function chordModifiers(): Record<ChordRole, ChordSide> {
+    return {
+      ctrl: armed.ctrl ? "any" : "off",
+      shift: armed.shift ? "any" : "off",
+      alt: armed.alt ? "any" : "off",
+      win: armed.win ? "any" : "off",
+    };
   }
 
   function switchTab(next: "keyboard" | "numpad") {
@@ -56,6 +130,17 @@
   }
 
   function describe(key: KeyDef): string {
+    const role = modifierRole(key.vk);
+    // Both physical sides describe the shared role: arming binds either
+    // side, so the tooltip must not promise a side pin this dialog does not
+    // set. The cap's `aria-label` still names the physical cap ("Left Ctrl")
+    // so a screen-reader user can tell the two apart, as a sighted user does
+    // by position.
+    if (role) {
+      return armed[role]
+        ? `${ROLE_NAMES[role]} is armed — click it again to disarm, or click a key to complete the combination`
+        : `${ROLE_NAMES[role]} — click to arm it for a combination`;
+    }
     return isBlockedVk(key.vk)
       ? `${nameOf(key)} — the Windows keys cannot be used`
       : nameOf(key);
@@ -166,36 +251,63 @@
     {/if}
     </div>
 
+    {#if armed.win}
+      <p class="warn">
+        Windows and the shell own many Win+ shortcuts and may act on the combination too —
+        we cannot stop that.
+      </p>
+    {/if}
+
     <footer>
       <span class="status" aria-live="polite">
         {#if hovered}
           {describe(hovered)}
+        {:else if armedNames.length > 0}
+          {armedLabel} armed — click a key to bind it with {armedLabel}, or click a selected
+          modifier again to disarm.
         {:else}
           Click a key to use it as the {target === "toggle" ? "toggle" : "push-to-talk"} key.
         {/if}
       </span>
+      {#if armedRoles.length >= 2}
+        <button
+          class="commit"
+          title="Bind {armedLabel} on its own, with no key"
+          onclick={commitModifierOnly}
+        >
+          Use this combination
+        </button>
+      {/if}
       <span class="current">Now: <strong>{currentLabel || "—"}</strong></span>
     </footer>
     <p class="note">
-      Shift, Ctrl and Alt can be used — switch off “Also block the key from other
-      applications” for them. The greyed-out Windows keys cannot. Punctuation keys are drawn
-      for a US keyboard; on other layouts they follow your layout. For a mouse button use
-      “Change”.
+      Click Shift, Ctrl, Alt or Win to arm it, then click the key that completes the
+      combination (Ctrl then N binds “Ctrl+N”); two or more armed modifiers can be bound on
+      their own with “Use this combination”. Armed modifiers match either side — pin Left or
+      Right afterwards in the hotkey row's selectors. No modifier can be bound on its own from
+      here: it arms a combination instead (the Windows keys cannot be bound at all).
+      Punctuation keys are drawn for a US keyboard; on other layouts they follow your layout.
+      For a mouse button use “Change”.
     </p>
   </div>
 </div>
 
 {#snippet keycap(key: KeyDef, columns: number)}
-  {@const blocked = isBlockedVk(key.vk)}
+  {@const role = modifierRole(key.vk)}
+  <!-- A blocked key is one barred from being the key of a binding — the
+       Windows keys. They are chord modifiers, so they arm instead and are
+       never disabled; `blocked` only bites for a future key that is neither. -->
+  {@const blocked = isBlockedVk(key.vk) && role === null}
+  {@const lit = role !== null && armed[role]}
   <div class="slot" style:grid-column={columns ? `span ${columns}` : undefined}>
     <button
       class="key"
-      class:selected={key.vk === selectedVk}
+      class:selected={key.vk === selectedVk || lit}
       class:blocked
       class:wide={key.label.length > 1}
       disabled={blocked}
       aria-label={nameOf(key)}
-      aria-pressed={key.vk === selectedVk}
+      aria-pressed={key.vk === selectedVk || lit}
       title={describe(key)}
       onclick={() => pick(key)}
       onmouseenter={() => (hovered = key)}
@@ -342,7 +454,8 @@
   }
   .key:focus-visible,
   .tabs button:focus-visible,
-  .close:focus-visible {
+  .close:focus-visible,
+  .commit:focus-visible {
     outline: 2px solid #81c995;
     outline-offset: 1px;
   }
@@ -380,6 +493,30 @@
   }
   .current strong {
     color: #e8eaed;
+  }
+  .commit {
+    flex: 0 0 auto;
+    background: #2f6b45;
+    border: 1px solid #3d8a59;
+    border-radius: 7px;
+    padding: 0.3rem 0.7rem;
+    font: inherit;
+    font-size: 0.82rem;
+    color: #fff;
+    cursor: pointer;
+  }
+  .commit:hover {
+    background: #377c51;
+  }
+  .warn {
+    margin: 0.6rem 0 0;
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    background: #2b2616;
+    border: 1px solid #5d4e1f;
+    color: #f0dca0;
+    font-size: 0.82rem;
+    line-height: 1.35;
   }
   .note {
     margin: 0.45rem 0 0;

@@ -16,7 +16,10 @@ export type KeyDef = {
   vk: number;
   /// What is printed on the key cap (short).
   label: string;
-  /// Spoken / tooltip name when the cap alone is not enough.
+  /// Spoken / tooltip name when the cap alone is not enough. A modifier
+  /// cap's caption stays generic ("Ctrl") because an armed modifier matches
+  /// either side — its spoken name carries the side ("Left Ctrl") so a
+  /// screen-reader user can still tell the two caps apart.
   name?: string;
   /// Width in key units (1 = a letter key). Defaults to 1.
   w?: number;
@@ -31,22 +34,63 @@ export function isSpacer(cell: Cell): cell is Spacer {
   return "gap" in cell;
 }
 
-/// Keys the picker shows but does not let you pick: the two Windows keys. A
-/// tap on them opens the Start menu and they carry system shortcuts.
+/// The four modifier roles a chord can carry, and the side word each one
+/// stores in `config.toml` (spec §8). `ChordRole` mirrors `SideRole` in
+/// App.svelte and `Role` in crates/ptt-core/src/input/chord.rs.
+export type ChordRole = "ctrl" | "shift" | "alt" | "win";
+export type ChordSide = "off" | "any" | "left" | "right";
+
+/// What a click in the on-screen keyboard hands back through `onpick`,
+/// shaped like serde's external tagging of `Binding` (so the settings
+/// window's `applyCaptured` writes it straight into the draft): a plain
+/// key, or a chord whose final member is a key — the board has no mouse
+/// buttons, those stay with "press any key".
+export type PickedBinding =
+  | { Key: { vk: number; scan: number } }
+  | {
+      Chord: {
+        modifiers: Record<ChordRole, ChordSide>;
+        key: { Key: { vk: number; scan: number } } | null;
+      };
+    };
+
+/// The chord role a key arms when clicked, or `null` for ordinary keys.
+/// Both physical sides map to the same role: arming defaults to `Any`, and
+/// pinning a side is the settings row's three-way selector's job (spec §9).
+export function modifierRole(vk: number): ChordRole | null {
+  if (vk === 0xa0 || vk === 0xa1) return "shift";
+  if (vk === 0xa2 || vk === 0xa3) return "ctrl";
+  if (vk === 0xa4 || vk === 0xa5) return "alt";
+  if (vk === 0x5b || vk === 0x5c) return "win";
+  return null;
+}
+
+/// Keys the picker never accepts *as the key of a binding*: the two Windows
+/// keys. A tap on them opens the Start menu and they carry system
+/// shortcuts — but they *can* be armed as the Win member of a combination
+/// (see `modifierRole`), so the picker does not disable them; this only
+/// keeps a standalone `Win` binding impossible.
 ///
-/// Shift, Ctrl and Alt *can* be picked here — always as the left/right
-/// variant (0xA0–0xA5). Which form the low-level hook then reports for a
-/// press (that side-specific code, or the generic 0x10–0x12) is irrelevant:
-/// `matches_key` in crates/ptt-core/src/input/mod.rs normalises *both*
-/// sides of the comparison to the modifier role, so it matches either way
-/// and no such binding can silently never fire. ("Press any key" still
-/// skips all modifiers, so a shortcut chord cannot bind one by accident.)
+/// Shift, Ctrl and Alt arm their chord role the same way instead of being
+/// picked (see `modifierRole`), so — like the Windows keys — no modifier of
+/// either side (0xA0–0xA5) can be the key of a binding any more. Which side
+/// is held is the settings row's three-way selectors' job: `matches_key` in
+/// crates/ptt-core/src/input/mod.rs normalises *both* sides of the
+/// comparison to the modifier role, so an `Any` side matches whichever one
+/// goes down — which is why the caps carry the generic captions ("Shift",
+/// not "Left Shift"); the side is only in the spoken name. ("Press any key"
+/// still skips all modifiers, so a shortcut chord cannot bind one by
+/// accident; a modifier can still reach `isShiftCtrlAltVk` only through a
+/// hand-written `config.toml`.)
 export function isBlockedVk(vk: number): boolean {
   return vk === 0x5b || vk === 0x5c;
 }
 
 /// Left/right Shift, Ctrl and Alt. Bound with "Also block the key from other
-/// applications" on, such a key would stop working in every program.
+/// applications" on, such a key would stop working in every program. The
+/// picker and "Press any key" both refuse to produce one any more (see
+/// `isBlockedVk`), so only a hand-written `config.toml` can still arrive
+/// here with a modifier as its plain key.
 export function isShiftCtrlAltVk(vk: number): boolean {
   return vk >= 0xa0 && vk <= 0xa5;
 }

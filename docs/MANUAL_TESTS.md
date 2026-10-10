@@ -117,13 +117,21 @@ Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
 - [ ] Settings window: **On-screen keyboard** opens a keyboard; clicking a key
       closes it and the label updates (e.g. "A", "F9"); Save, then hold that
       key — the mic unmutes. The currently bound key is highlighted green.
-- [ ] On-screen keyboard: the Win keys are greyed out and do nothing when
-      clicked; Esc, ✕ or a click outside closes it without changing the
-      binding; Tab stays inside the dialog.
-- [ ] On-screen keyboard: pick Left Ctrl / Left Shift / Left Alt (and the right
-      ones), Save, hold it — the mic unmutes. With "Also block the key" on, a
-      yellow warning appears; with it off, the key keeps working elsewhere.
-      (Right Alt may act as AltGr on some layouts.)
+- [ ] On-screen keyboard: clicking a Win key arms `Win` for a combination
+      (see CHD-7) — a Windows key can never be bound on its own; Esc, ✕ or a
+      click outside closes it without changing the binding; Tab stays inside
+      the dialog.
+- [ ] On-screen keyboard: click Ctrl / Shift / Alt to arm it (the caps read
+      the generic names — an armed modifier matches either side), then click
+      a key to complete the combination ("Ctrl+N"), or arm two modifiers and
+      press "Use this combination" ("Ctrl+Shift"); Save, hold it — the mic
+      unmutes. A modifier alone can no longer be picked here, so the yellow
+      "blocking Shift, Ctrl or Alt" warning cannot be raised from this window
+      any more — check instead that the swallow caption under the binding
+      names what is really blocked (the final key, or the last modifier you
+      press in a modifier-only combination), and with the box unticked the
+      whole combination still works in other programs. (Right Alt may act as
+      AltGr on some layouts.)
 - [ ] On-screen keyboard, Numpad tab: Numpad 0–9 bind with Num Lock **on**
       (label "Numpad 5"); punctuation keys show as "OEM n (…)" and bind the key
       that is physically there on a non-US layout too.
@@ -248,9 +256,48 @@ bound and Saved.
       changes; **Save** → that key toggles talk.
 - [ ] **OSK-2 Rows stay independent** — the dialog opened from the *Hotkey*
       row highlights the **PTT** key and picking changes only that row; a
-      modifier (Left Shift) picked for the toggle shows the modifier
-      warning; Win keys are greyed on both rows; nothing persists before
-      **Save**.
+      modifier (Shift) can no longer be picked as the toggle key — it arms a
+      combination instead, so arm Ctrl + Shift and press "Use this
+      combination" from the *Toggle key* row: only that row changes and the
+      row then shows the four side selectors, where switching one of the two
+      modifiers to **Off** raises the yellow "not a valid binding" warning
+      (a lone Shift can no longer be picked outright on either row);
+      Win keys arm a combination but can never be picked as the key on
+      either row; nothing persists before **Save**.
+
+### Chord bindings — CHD-1…CHD-8
+
+Set a combination two ways: **Change**, then hold a modifier and press the
+rest (the backend owns modifier-initiated capture and answers with the
+chord), or build it in the **On-screen keyboard** — click Ctrl / Shift /
+Alt / Win to arm them, then click the key that completes the combination,
+or use "Use this combination" for one with no key (CHD-7). Either way the
+row shows the combination (`Ctrl+N`); **Save** applies it. CHD-2 onward
+assume `Ctrl+N` is bound and Saved.
+
+- [ ] **CHD-1 Hold-and-press capture** — "Change" → hold Ctrl, press N. The
+      row reads "Ctrl+N". A lone Ctrl pressed and released captures nothing
+      and re-arms.
+- [ ] **CHD-2 Chord holds the mic** — with `Ctrl+N` bound, holding both
+      talks; releasing Ctrl *or* N while holding the other mutes
+      immediately; re-pressing Ctrl does not resume.
+- [ ] **CHD-3 Modifiers still work everywhere** — with `Ctrl+N` bound and
+      swallow on, `Ctrl+C`/`Ctrl+V`/`Ctrl+A` still work in a text editor.
+      Only N is blocked.
+- [ ] **CHD-4 Left/right pinning** — capture with the right Ctrl → row reads
+      "Right Ctrl+N"; it must NOT fire on the left Ctrl until loosened to
+      "Any", and must fire once loosened.
+- [ ] **CHD-5 Modifier-only chord** — bind `Ctrl+Shift`; it engages when
+      both are held and releases when either is let go.
+- [ ] **CHD-6 Exact match** — with `Ctrl+N` bound, `Ctrl+Shift+N` must not
+      talk.
+- [ ] **CHD-7 OSK chord building** — arm Ctrl in the on-screen keyboard,
+      click N, save; the binding works. Two armed modifiers show "Use this
+      combination".
+- [ ] **CHD-8 No stuck modifier after a long session** — after 20 minutes of
+      Apex with a chord bound, releasing everything mutes; no
+      `HookThreadStalled`, no `wait-state probe`, no `hook-thread phase:`
+      line in ptt.log or findings.log.
 
 ### Input-stall diagnostics — DIAG-1…DIAG-7
 
