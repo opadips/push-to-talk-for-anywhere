@@ -6,6 +6,7 @@
 //! yields defaults with an explanation the caller can log.
 
 use crate::error::{Error, Result};
+use crate::input::chord::{Chord, ChordKey, Modifiers, Side};
 use crate::input::{Binding, MouseButton};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -48,12 +49,19 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BindingConfig {
-    /// `"key"` or `"mouse"`.
+    /// `"key"`, `"mouse"` or `"chord"`.
     pub kind: String,
     pub vk: u16,
     pub scan: u16,
     /// `""` unless `kind = "mouse"`.
     pub mouse_button: String,
+    /// Chord modifier roles: `"off"`, `"any"`, `"left"` or `"right"`.
+    /// Additive (spec §8): a file from before chords existed omits them and
+    /// deserialises to `"off"` — the same binding as before, unchanged.
+    pub ctrl: String,
+    pub shift: String,
+    pub alt: String,
+    pub win: String,
     pub swallow: bool,
 }
 
@@ -64,12 +72,19 @@ pub struct BindingConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToggleConfig {
-    /// `"key"`, `"mouse"` or `""` (unbound).
+    /// `"key"`, `"mouse"`, `"chord"` or `""` (unbound).
     pub kind: String,
     pub vk: u16,
     pub scan: u16,
     /// `""` unless `kind = "mouse"`.
     pub mouse_button: String,
+    /// Chord modifier roles: `"off"`, `"any"`, `"left"` or `"right"` —
+    /// additive like [`BindingConfig::ctrl`], so an older file loads
+    /// unchanged.
+    pub ctrl: String,
+    pub shift: String,
+    pub alt: String,
+    pub win: String,
     pub swallow: bool,
 }
 
@@ -151,6 +166,10 @@ impl Default for BindingConfig {
             vk: DEFAULT_VK,
             scan: DEFAULT_SCAN,
             mouse_button: String::new(),
+            ctrl: "off".to_string(),
+            shift: "off".to_string(),
+            alt: "off".to_string(),
+            win: "off".to_string(),
             swallow: true,
         }
     }
@@ -163,8 +182,126 @@ impl Default for ToggleConfig {
             vk: 0,
             scan: 0,
             mouse_button: String::new(),
+            ctrl: "off".to_string(),
+            shift: "off".to_string(),
+            alt: "off".to_string(),
+            win: "off".to_string(),
             swallow: true,
         }
+    }
+}
+
+impl BindingConfig {
+    /// The chord this block describes (spec §8), or an error naming the
+    /// first field that cannot be trusted — an unknown side word, an
+    /// unknown mouse button, or an invalid chord — for the same "cannot be
+    /// parsed" treatment an unknown `kind` gets.
+    fn chord(&self) -> std::result::Result<Chord, String> {
+        chord_from(
+            self.vk,
+            self.scan,
+            &self.mouse_button,
+            &self.ctrl,
+            &self.shift,
+            &self.alt,
+            &self.win,
+        )
+    }
+
+    /// Put the chord side fields back to `"off"` — a non-chord binding
+    /// leaves no modifiers behind in the file.
+    fn clear_chord_fields(&mut self) {
+        self.ctrl = "off".to_string();
+        self.shift = "off".to_string();
+        self.alt = "off".to_string();
+        self.win = "off".to_string();
+    }
+}
+
+impl ToggleConfig {
+    /// [`BindingConfig::chord`] for the toggle block.
+    fn chord(&self) -> std::result::Result<Chord, String> {
+        chord_from(
+            self.vk,
+            self.scan,
+            &self.mouse_button,
+            &self.ctrl,
+            &self.shift,
+            &self.alt,
+            &self.win,
+        )
+    }
+
+    /// [`BindingConfig::clear_chord_fields`] for the toggle block.
+    fn clear_chord_fields(&mut self) {
+        self.ctrl = "off".to_string();
+        self.shift = "off".to_string();
+        self.alt = "off".to_string();
+        self.win = "off".to_string();
+    }
+}
+
+/// The chord the flat `kind = "chord"` fields describe (spec §8), or an
+/// error naming the first field that cannot be trusted: an unknown side
+/// word, an unknown mouse button, or a chord [`Chord::is_valid`] rejects —
+/// a bare single modifier is still not a binding (spec §3). `vk == 0` with
+/// no mouse button marks the modifier-only form, exactly as the spec's
+/// example config says.
+///
+/// A non-empty `mouse_button` **wins** over a non-zero `vk`. Spec §8 says
+/// `mouse_button` is set *instead of* `vk` when the final member is a
+/// button, and every writer in this file zeroes whichever field it does not
+/// use ([`Config::set_binding`]), so both can only be filled by a
+/// hand-edited file — where the button is the more specific claim about the
+/// final member. The rule lives here because this function only reads the
+/// flat fields; the writer never has to arbitrate.
+fn chord_from(
+    vk: u16,
+    scan: u16,
+    mouse_button: &str,
+    ctrl: &str,
+    shift: &str,
+    alt: &str,
+    win: &str,
+) -> std::result::Result<Chord, String> {
+    let modifiers = Modifiers {
+        ctrl: side_from(ctrl).ok_or_else(|| side_problem("ctrl", ctrl))?,
+        shift: side_from(shift).ok_or_else(|| side_problem("shift", shift))?,
+        alt: side_from(alt).ok_or_else(|| side_problem("alt", alt))?,
+        win: side_from(win).ok_or_else(|| side_problem("win", win))?,
+    };
+    let key = if !mouse_button.is_empty() {
+        let button = MouseButton::from_name(mouse_button)
+            .map_err(|_| format!("mouse_button {mouse_button:?} is unknown"))?;
+        Some(ChordKey::Mouse(button))
+    } else if vk != 0 {
+        Some(ChordKey::Key { vk, scan })
+    } else {
+        None
+    };
+    let chord = Chord { modifiers, key };
+    if chord.is_valid() {
+        Ok(chord)
+    } else {
+        Err(format!("{} is not a valid chord", chord.label()))
+    }
+}
+
+/// What to tell the user when a chord side field is not one of the four
+/// words (spec §8).
+fn side_problem(field: &str, value: &str) -> String {
+    format!("{field} side {value:?} is unknown (expected off|any|left|right)")
+}
+
+/// One side field's meaning: `"off"`, `"any"`, `"left"` or `"right"`
+/// (spec §8), case-insensitively like [`MouseButton::from_name`].
+fn side_from(text: &str) -> Option<Side> {
+    match text.to_ascii_lowercase().as_str() {
+        "off" => Some(Side::Off),
+        "any" => Some(Side::Any),
+        "left" => Some(Side::Left),
+        "right" => Some(Side::Right),
+        _ => None,
     }
 }
 
@@ -427,6 +564,18 @@ impl Config {
                 self.binding.mouse_button = MouseButton::X1.name().to_string();
             }
             "mouse" => {}
+            // Spec §8: a chord the file cannot describe — an unknown side
+            // word, an unknown mouse button, or an invalid (bare-modifier)
+            // chord — falls back exactly like an unknown kind, and the
+            // message names the field that was wrong.
+            "chord" => {
+                if let Err(problem) = self.binding.chord() {
+                    messages.push(format!(
+                        "binding kind \"chord\" is unusable ({problem}); using the default key"
+                    ));
+                    self.binding = BindingConfig::default();
+                }
+            }
             other => {
                 messages.push(format!(
                     "binding kind {other:?} is unknown; using the default key"
@@ -450,6 +599,16 @@ impl Config {
                 self.toggle = ToggleConfig::default();
             }
             "mouse" => {}
+            // Same fallback as the binding chord: an unusable chord unbinds
+            // the toggle rather than leaving a half-parsed one behind.
+            "chord" => {
+                if let Err(problem) = self.toggle.chord() {
+                    messages.push(format!(
+                        "toggle kind \"chord\" is unusable ({problem}); unbinding the toggle"
+                    ));
+                    self.toggle = ToggleConfig::default();
+                }
+            }
             other => {
                 messages.push(format!(
                     "toggle kind {other:?} is unknown; unbinding the toggle"
@@ -463,6 +622,19 @@ impl Config {
 
     /// The bound input this config asks for (plan §4).
     pub fn binding(&self) -> Binding {
+        if self.binding.kind == "chord" {
+            // An unusable chord cannot have survived `validate`, but a
+            // caller may hold an in-memory config that never went through
+            // it; behave like the unknown-`kind` fallback and ask for the
+            // default key rather than half a chord.
+            return match self.binding.chord() {
+                Ok(chord) => Binding::Chord(chord),
+                Err(_) => Binding::Key {
+                    vk: DEFAULT_VK,
+                    scan: DEFAULT_SCAN,
+                },
+            };
+        }
         if self.binding.kind == "mouse" {
             if let Ok(button) = MouseButton::from_name(&self.binding.mouse_button) {
                 return Binding::Mouse(button);
@@ -482,14 +654,40 @@ impl Config {
                 self.binding.vk = vk;
                 self.binding.scan = scan;
                 self.binding.mouse_button.clear();
+                self.binding.clear_chord_fields();
             }
             Binding::Mouse(button) => {
                 self.binding.kind = "mouse".to_string();
                 self.binding.mouse_button = button.name().to_string();
+                self.binding.clear_chord_fields();
             }
-            // Chords are not storable in the flat config fields yet, and
-            // capture cannot produce one — until it can, this is unreachable.
-            Binding::Chord(_) => unreachable!(),
+            Binding::Chord(chord) => {
+                self.binding.kind = "chord".to_string();
+                self.binding.ctrl = chord.modifiers.ctrl.name().to_string();
+                self.binding.shift = chord.modifiers.shift.name().to_string();
+                self.binding.alt = chord.modifiers.alt.name().to_string();
+                self.binding.win = chord.modifiers.win.name().to_string();
+                match chord.key {
+                    // A final mouse button lives in `mouse_button`, with
+                    // `vk` zeroed (spec §8); a keyed chord claims both `vk`
+                    // and `scan`; a modifier-only chord leaves them 0.
+                    Some(ChordKey::Key { vk, scan }) => {
+                        self.binding.vk = vk;
+                        self.binding.scan = scan;
+                        self.binding.mouse_button.clear();
+                    }
+                    Some(ChordKey::Mouse(button)) => {
+                        self.binding.vk = 0;
+                        self.binding.scan = 0;
+                        self.binding.mouse_button = button.name().to_string();
+                    }
+                    None => {
+                        self.binding.vk = 0;
+                        self.binding.scan = 0;
+                        self.binding.mouse_button.clear();
+                    }
+                }
+            }
         }
         self.binding.swallow = swallow;
     }
@@ -505,6 +703,8 @@ impl Config {
             "mouse" => MouseButton::from_name(&self.toggle.mouse_button)
                 .ok()
                 .map(Binding::Mouse),
+            // As with `binding()`: an unusable chord behaves unbound.
+            "chord" => self.toggle.chord().ok().map(Binding::Chord),
             _ => None,
         }
     }
@@ -518,19 +718,44 @@ impl Config {
                 self.toggle.vk = 0;
                 self.toggle.scan = 0;
                 self.toggle.mouse_button.clear();
+                self.toggle.clear_chord_fields();
             }
             Some(Binding::Key { vk, scan }) => {
                 self.toggle.kind = "key".to_string();
                 self.toggle.vk = *vk;
                 self.toggle.scan = *scan;
                 self.toggle.mouse_button.clear();
+                self.toggle.clear_chord_fields();
             }
             Some(Binding::Mouse(button)) => {
                 self.toggle.kind = "mouse".to_string();
                 self.toggle.mouse_button = button.name().to_string();
+                self.toggle.clear_chord_fields();
             }
-            // Same as `set_binding`: nothing produces a chord yet.
-            Some(Binding::Chord(_)) => unreachable!(),
+            Some(Binding::Chord(chord)) => {
+                self.toggle.kind = "chord".to_string();
+                self.toggle.ctrl = chord.modifiers.ctrl.name().to_string();
+                self.toggle.shift = chord.modifiers.shift.name().to_string();
+                self.toggle.alt = chord.modifiers.alt.name().to_string();
+                self.toggle.win = chord.modifiers.win.name().to_string();
+                match chord.key {
+                    Some(ChordKey::Key { vk, scan }) => {
+                        self.toggle.vk = vk;
+                        self.toggle.scan = scan;
+                        self.toggle.mouse_button.clear();
+                    }
+                    Some(ChordKey::Mouse(button)) => {
+                        self.toggle.vk = 0;
+                        self.toggle.scan = 0;
+                        self.toggle.mouse_button = button.name().to_string();
+                    }
+                    None => {
+                        self.toggle.vk = 0;
+                        self.toggle.scan = 0;
+                        self.toggle.mouse_button.clear();
+                    }
+                }
+            }
         }
         self.toggle.swallow = swallow;
     }
@@ -853,6 +1078,293 @@ mouse_button = "x2"
         assert_eq!(report.source, LoadSource::File);
         assert_eq!(cfg.toggle, ToggleConfig::default());
         assert_eq!(cfg.toggle_binding(), None);
+    }
+
+    // --- chords (spec §8: additive fields, no version bump) --------------
+
+    fn ctrl_n_chord() -> Binding {
+        Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        })
+    }
+
+    /// Spec §8's own example shape: `Ctrl` held with a left mouse button as
+    /// the final member.
+    fn ctrl_left_mouse_chord() -> Binding {
+        Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Mouse(MouseButton::Left)),
+        })
+    }
+
+    #[test]
+    fn a_chord_round_trips_through_the_file() {
+        let path = scratch("chord-roundtrip.toml");
+        let mut cfg = Config::default();
+        cfg.set_binding(&ctrl_n_chord(), true);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert_eq!(report.source, LoadSource::File);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(loaded.binding(), ctrl_n_chord());
+        assert_eq!(loaded.binding.ctrl, "any");
+        assert_eq!(loaded.binding.shift, "off");
+        assert_eq!(loaded.binding.vk, 0x4E, "the final key keeps its fields");
+    }
+
+    #[test]
+    fn a_modifier_only_chord_round_trips() {
+        let path = scratch("modifier-only-chord.toml");
+        let chord = Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                shift: Side::Any,
+                ..Default::default()
+            },
+            key: None,
+        });
+        let mut cfg = Config::default();
+        cfg.set_binding(&chord, true);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(loaded.binding(), chord);
+        assert_eq!(
+            loaded.binding.vk, 0,
+            "spec §8: 0 marks a modifier-only chord"
+        );
+        assert_eq!(loaded.binding.ctrl, "any");
+        assert_eq!(loaded.binding.shift, "any");
+        assert_eq!(loaded.binding.alt, "off");
+        assert_eq!(loaded.binding.win, "off");
+    }
+
+    #[test]
+    fn a_pinned_side_survives_the_file() {
+        let path = scratch("pinned-side-chord.toml");
+        let chord = Binding::Chord(Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Right,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
+        });
+        let mut cfg = Config::default();
+        cfg.set_binding(&chord, true);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(loaded.binding(), chord, "Right Ctrl+N comes back pinned");
+        assert_eq!(loaded.binding.ctrl, "right");
+    }
+
+    #[test]
+    fn a_config_without_chord_fields_loads_exactly_as_before() {
+        let path = scratch("pre-chord-file.toml");
+        std::fs::write(
+            &path,
+            r##"version = 1
+enabled = true
+
+[binding]
+kind = "key"
+vk = 0x41
+scan = 0x1E
+swallow = false
+"##,
+        )
+        .unwrap();
+
+        let (cfg, report) = Config::load(&path);
+
+        assert_eq!(report.source, LoadSource::File);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(
+            cfg.binding(),
+            Binding::Key {
+                vk: 0x41,
+                scan: 0x1E
+            },
+            "an old file binds exactly what it said"
+        );
+        for (field, expected) in [
+            (&cfg.binding.ctrl, "off"),
+            (&cfg.binding.shift, "off"),
+            (&cfg.binding.alt, "off"),
+            (&cfg.binding.win, "off"),
+        ] {
+            assert_eq!(field, expected, "a missing side field means off");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_side_falls_back_to_the_default_binding() {
+        let path = scratch("bad-side.toml");
+        std::fs::write(
+            &path,
+            "[binding]\nkind = \"chord\"\nctrl = \"sideways\"\nvk = 0x4E\nscan = 49\n",
+        )
+        .unwrap();
+
+        let (cfg, report) = Config::load(&path);
+
+        assert_eq!(cfg.binding(), Config::default().binding());
+        assert_eq!(cfg.binding.kind, "key", "the unusable block is replaced");
+        assert!(
+            report.messages.iter().any(|m| m.contains("chord")),
+            "{:?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn a_bare_modifier_chord_falls_back_because_it_is_invalid() {
+        let path = scratch("bare-modifier-chord.toml");
+        // `vk = 0` marks a modifier-only chord (spec §8); one modifier with
+        // no key is the bare single modifier "press any key" has always
+        // rejected ("cannot be held to talk").
+        std::fs::write(
+            &path,
+            "[binding]\nkind = \"chord\"\nctrl = \"any\"\nvk = 0\n",
+        )
+        .unwrap();
+
+        let (cfg, report) = Config::load(&path);
+
+        assert_eq!(cfg.binding(), Config::default().binding());
+        assert!(
+            report.messages.iter().any(|m| m.contains("chord")),
+            "{:?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn a_toggle_chord_round_trips() {
+        let path = scratch("toggle-chord.toml");
+        let mut cfg = Config::default();
+        cfg.set_toggle_binding(Some(&ctrl_n_chord()), false);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(loaded.toggle_binding(), Some(ctrl_n_chord()));
+        assert_eq!(loaded.toggle.kind, "chord");
+        assert_eq!(loaded.toggle.ctrl, "any");
+        assert!(!loaded.toggle.swallow);
+    }
+
+    #[test]
+    fn a_chord_ending_in_a_mouse_button_round_trips() {
+        let path = scratch("mouse-chord.toml");
+        let mut cfg = Config::default();
+        cfg.set_binding(&ctrl_left_mouse_chord(), true);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(loaded.binding(), ctrl_left_mouse_chord());
+        assert_eq!(loaded.binding.kind, "chord");
+        assert_eq!(
+            loaded.binding.mouse_button, "left",
+            "the button keeps its field"
+        );
+        assert_eq!(loaded.binding.vk, 0, "spec §8: set instead of vk");
+        assert_eq!(loaded.binding.scan, 0);
+        assert_eq!(loaded.binding.ctrl, "any");
+        assert_eq!(loaded.binding.shift, "off");
+        assert_eq!(loaded.binding.alt, "off");
+        assert_eq!(loaded.binding.win, "off");
+    }
+
+    #[test]
+    fn a_toggle_chord_ending_in_a_mouse_button_round_trips() {
+        let path = scratch("toggle-mouse-chord.toml");
+        let mut cfg = Config::default();
+        cfg.set_toggle_binding(Some(&ctrl_left_mouse_chord()), false);
+
+        cfg.save(&path).expect("save works");
+
+        let (loaded, report) = Config::load(&path);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(loaded.toggle_binding(), Some(ctrl_left_mouse_chord()));
+        assert_eq!(loaded.toggle.mouse_button, "left");
+        assert_eq!(loaded.toggle.vk, 0);
+        assert_eq!(loaded.toggle.ctrl, "any");
+        assert_eq!(loaded.toggle.win, "off");
+        assert!(!loaded.toggle.swallow);
+    }
+
+    #[test]
+    fn an_unknown_mouse_button_inside_a_chord_falls_back_and_names_the_field() {
+        // The two blocks share `chord_from`, so one table covers both arms.
+        let mut binding_block = Config::default();
+        binding_block.binding.kind = "chord".into();
+        binding_block.binding.ctrl = "any".into();
+        binding_block.binding.mouse_button = "thumb".into();
+
+        let mut toggle_block = Config::default();
+        toggle_block.toggle.kind = "chord".into();
+        toggle_block.toggle.ctrl = "any".into();
+        toggle_block.toggle.mouse_button = "thumb".into();
+
+        for (mut cfg, block) in [(binding_block, "binding"), (toggle_block, "toggle")] {
+            let messages = cfg.validate();
+
+            assert!(
+                messages.iter().any(|m| {
+                    m.contains(block) && m.contains("mouse_button") && m.contains("thumb")
+                }),
+                "{block}: {messages:?}"
+            );
+            assert_eq!(
+                cfg.binding(),
+                Config::default().binding(),
+                "{block}: the unusable chord is replaced, not half-kept"
+            );
+            assert_eq!(cfg.toggle_binding(), None, "{block} falls back");
+        }
+    }
+
+    #[test]
+    fn a_mouse_button_wins_over_a_leftover_vk() {
+        // Spec §8 writes `mouse_button` *instead of* `vk`, so only a
+        // hand-edited file can carry both; there the button is the more
+        // specific claim about the final member and must win.
+        let path = scratch("chord-mouse-beats-vk.toml");
+        std::fs::write(
+            &path,
+            "[binding]\nkind = \"chord\"\nctrl = \"any\"\nmouse_button = \"left\"\nvk = 0x41\nscan = 0x1E\n",
+        )
+        .unwrap();
+
+        let (cfg, report) = Config::load(&path);
+
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        assert_eq!(
+            cfg.binding(),
+            ctrl_left_mouse_chord(),
+            "the mouse button, not the leftover vk, is the final member"
+        );
+        assert_eq!(
+            cfg.binding.vk, 0x41,
+            "the leftover vk is left in the file, merely unused"
+        );
     }
 
     // --- overlay ---------------------------------------------------------
