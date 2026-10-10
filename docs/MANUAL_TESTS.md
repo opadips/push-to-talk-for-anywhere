@@ -265,7 +265,7 @@ bound and Saved.
       Win keys arm a combination but can never be picked as the key on
       either row; nothing persists before **Save**.
 
-### Chord bindings — CHD-1…CHD-8
+### Chord bindings — CHD-1…CHD-9
 
 Set a combination two ways: **Change**, then hold a modifier and press the
 rest (the backend owns modifier-initiated capture and answers with the
@@ -298,6 +298,15 @@ assume `Ctrl+N` is bound and Saved.
       Apex with a chord bound, releasing everything mutes; no
       `HookThreadStalled`, no `wait-state probe`, no `hook-thread phase:`
       line in ptt.log or findings.log.
+
+- [ ] **CHD-9 Capture with the settings window focused** — click **Change**,
+      then with the settings window still focused hold Ctrl and press N.
+      The row must read `Ctrl+N`, **not** a bare `N`. This is the path that
+      uses Raw Input instead of the low-level hook, and it is the one most
+      likely to regress: a bare `N` here means the page answered before the
+      backend could. Repeat once for the toggle row, and once more after
+      switching away from the settings window and back mid-capture (the
+      capture should not wedge — a plain key still cancels it).
 
 ### Input-stall diagnostics — DIAG-1…DIAG-7
 
