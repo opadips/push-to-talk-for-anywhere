@@ -113,6 +113,20 @@ impl Slot {
         }
     }
 
+    /// The side-specific virtual-key code a lone press of this slot binds as,
+    /// or `None` for the Windows keys, which are never bindable on their own.
+    fn plain_vk(self) -> Option<u16> {
+        match self {
+            Self::LeftShift => Some(0xA0),
+            Self::RightShift => Some(0xA1),
+            Self::LeftCtrl => Some(0xA2),
+            Self::RightCtrl => Some(0xA3),
+            Self::LeftAlt => Some(0xA4),
+            Self::RightAlt => Some(0xA5),
+            Self::LeftWin | Self::RightWin => None,
+        }
+    }
+
     /// The modifier role this slot belongs to. The capture accumulator uses
     /// it to turn a pressed slot back into the `(Role, Side)` pair a chord
     /// records (spec §7).
@@ -796,10 +810,10 @@ pub enum CaptureAnswer {
 /// released: a forwarded Ctrl press whose release is swallowed leaves the
 /// user's editor or browser stuck on Ctrl.
 ///
-/// The one rule carried over from today's capture unchanged: a lone modifier
-/// pressed and released is *discarded*, not answered — a bare modifier
-/// cannot be held to talk (spec §3). The accumulator simply re-arms and
-/// keeps waiting.
+/// A lone Shift/Ctrl/Alt pressed and released is answered as that plain key
+/// (`Left Alt` can be the hold-to-talk key). A lone Windows key, or both
+/// sides of one role, is *discarded*: the accumulator re-arms and keeps
+/// waiting.
 ///
 /// Whether the capture *already answered* is a separate question from
 /// whether it is armed — hence [`CaptureAccumulator::is_spent`], which the
@@ -820,6 +834,13 @@ pub struct CaptureAccumulator {
     discarded: bool,
     /// The modifier roles accumulated so far, with the side as pressed.
     modifiers: Modifiers,
+    /// The one physical modifier key pressed so far, with its scan code — what
+    /// a bare modifier is answered with. `None` once a second, different
+    /// key joined (both sides of one role is ambiguous).
+    lone: Option<(Slot, u16)>,
+    /// Whether a modifier key was pressed at all since the last answer or
+    /// discard, so `lone == None` can tell "ambiguous" from "nothing yet".
+    lone_seen: bool,
     /// Which modifier slots are physically down, as a set — never a count of
     /// events. `KBDLLHOOKSTRUCT` reports no repeat bit, so Windows
     /// auto-repeats a held modifier's key-down: counting events would leave
@@ -914,6 +935,12 @@ impl CaptureAccumulator {
         if down {
             if let Some(slot) = modifier_slot(vk, scan, extended) {
                 self.record(slot);
+                self.lone = match (self.lone_seen, self.lone) {
+                    (false, _) => Some((slot, scan)),
+                    (true, Some((first, _))) if first == slot => self.lone,
+                    _ => None,
+                };
+                self.lone_seen = true;
                 // Idempotent: an auto-repeat re-inserts an already-held slot.
                 self.held.insert(slot);
                 None
@@ -958,9 +985,24 @@ impl CaptureAccumulator {
             // A bare single modifier is not a binding (spec §3): discard it
             // and re-arm rather than answer.
             1 => {
+                let lone = self.lone;
                 self.modifiers = Modifiers::default();
-                self.discarded = true;
-                None
+                self.lone = None;
+                self.lone_seen = false;
+                match lone.and_then(|(slot, scan)| slot.plain_vk().map(|vk| (vk, scan))) {
+                    // A single Shift/Ctrl/Alt key, pressed and released on
+                    // its own, binds as that key (Left Alt is the default
+                    // binding). Win stays unbindable, as before.
+                    Some((vk, scan)) => {
+                        *self = Self::default();
+                        self.spent = true;
+                        Some(CaptureAnswer::Plain(Binding::Key { vk, scan }))
+                    }
+                    None => {
+                        self.discarded = true;
+                        None
+                    }
+                }
             }
             _ => {
                 let chord = Chord {
@@ -2285,8 +2327,8 @@ mod tests {
     #[test]
     fn a_lone_modifier_pressed_and_released_answers_nothing() {
         let mut capture = armed_capture();
-        capture.note_key(down(0x11, 0)); // Ctrl
-        capture.note_key(up(0x11, 0));
+        capture.note_key(down(0x5B, 0)); // Win
+        capture.note_key(up(0x5B, 0));
         assert_eq!(
             capture.note_release_all(),
             None,
@@ -2296,7 +2338,7 @@ mod tests {
             capture.swallows(),
             "the discard re-arms — capture keeps waiting"
         );
-        // The discarded Ctrl left no trace: the next sequence is Shift+N.
+        // The discarded Win left no trace: the next sequence is Shift+N.
         assert_eq!(capture.note_key(down(0x10, SCAN_LSHIFT)), None);
         assert_eq!(
             capture.note_key(down(0x4E, 49)),
@@ -2309,6 +2351,36 @@ mod tests {
             })),
             "only what was pressed after the discard is recorded"
         );
+    }
+
+    #[test]
+    fn a_lone_shift_ctrl_or_alt_binds_as_that_plain_key() {
+        for (vk, scan, extended, bound_vk) in [
+            (0x12, 56, false, 0xA4), // Left Alt
+            (0x12, 56, true, 0xA5),  // Right Alt
+            (0x11, 29, false, 0xA2), // Left Ctrl
+            (0x10, SCAN_RSHIFT, false, 0xA1),
+        ] {
+            let mut capture = armed_capture();
+            capture.note_key(KeyEvent::Down { vk, scan, extended });
+            capture.note_key(KeyEvent::Up { vk, scan, extended });
+            assert_eq!(
+                capture.note_release_all(),
+                Some(CaptureAnswer::Plain(Binding::Key { vk: bound_vk, scan })),
+            );
+            assert!(capture.is_spent());
+        }
+    }
+
+    #[test]
+    fn both_sides_of_one_role_is_still_discarded() {
+        let mut capture = armed_capture();
+        capture.note_key(down(0xA4, 56));
+        capture.note_key(down(0xA5, 56));
+        capture.note_key(up(0xA4, 56));
+        capture.note_key(up(0xA5, 56));
+        assert_eq!(capture.note_release_all(), None);
+        assert!(capture.discarded_lone_modifier());
     }
 
     #[test]
@@ -2401,12 +2473,12 @@ mod tests {
         let mut capture = armed_capture();
         for repeat in 0..4 {
             assert_eq!(
-                capture.note_key(down(0x11, 0)),
+                capture.note_key(down(0x5B, 0)),
                 None,
-                "auto-repeat {repeat} of Ctrl accumulates without answering"
+                "auto-repeat {repeat} of Win accumulates without answering"
             );
         }
-        capture.note_key(up(0x11, 0)); // one physical release
+        capture.note_key(up(0x5B, 0)); // one physical release
         assert_eq!(
             capture.note_release_all(),
             None,
@@ -2417,8 +2489,8 @@ mod tests {
             "the discard re-arms, with no stale modifier left behind"
         );
 
-        // The exact corruption this pins: a leftover repeated Ctrl would
-        // turn the next sequence into Ctrl+Shift+N instead of Shift+N.
+        // The exact corruption this pins: a leftover repeated Win would
+        // turn the next sequence into Win+Shift+N instead of Shift+N.
         assert_eq!(capture.note_key(down(0x10, SCAN_LSHIFT)), None);
         assert_eq!(
             capture.note_key(down(0x4E, 49)),
@@ -2429,7 +2501,7 @@ mod tests {
                 },
                 key: Some(ChordKey::Key { vk: 0x4E, scan: 49 }),
             })),
-            "only Shift is recorded: the repeated Ctrl left no trace"
+            "only Shift is recorded: the repeated Win left no trace"
         );
 
         // And a modifier-only chord still completes after repeats, because
@@ -2610,16 +2682,16 @@ mod tests {
         // never be mistaken for an answered capture.
         let mut capture = armed_capture();
         assert_eq!(
-            capture.note_key(down(0x11, 0)),
+            capture.note_key(down(0x5B, 0)),
             None,
-            "Ctrl alone answers nothing — it is the start of a sequence"
+            "Win alone answers nothing — it is the start of a sequence"
         );
         assert!(
             !capture.is_spent(),
             "a mid-capture modifier press must not mark the capture spent"
         );
 
-        capture.note_key(up(0x11, 0));
+        capture.note_key(up(0x5B, 0));
         assert_eq!(
             capture.note_release_all(),
             None,
