@@ -272,12 +272,18 @@ mod tests {
     fn positions_place_the_badge_on_the_requested_edge() {
         // 76x36 badge, 1920x1040 work area, distance 24.
         let (area, badge) = ((1920, 1040), (76, 36));
-        assert_eq!(overlay_position("bottom-right", 24, area, badge), (1820, 980));
+        assert_eq!(
+            overlay_position("bottom-right", 24, area, badge),
+            (1820, 980)
+        );
         assert_eq!(overlay_position("bottom-left", 24, area, badge), (24, 980));
         assert_eq!(overlay_position("top-left", 24, area, badge), (24, 24));
         assert_eq!(overlay_position("top-right", 24, area, badge), (1820, 24));
         assert_eq!(overlay_position("top-center", 24, area, badge), (922, 24));
-        assert_eq!(overlay_position("bottom-center", 24, area, badge), (922, 980));
+        assert_eq!(
+            overlay_position("bottom-center", 24, area, badge),
+            (922, 980)
+        );
     }
 
     #[test]
