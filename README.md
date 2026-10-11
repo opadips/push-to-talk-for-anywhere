@@ -34,7 +34,9 @@ stream — the mic opens when you press and closes when you let go.
 - **Doesn't clip your words.** A short release delay keeps the last syllable
   from getting cut off (default 200 ms, adjustable).
 - **Your key, your call.** Any keyboard key or mouse button, including side
-  buttons. Optionally swallow it so it never reaches other apps.
+  buttons, a single modifier like Left Alt, or a whole combination such as
+  Ctrl+Shift or Right Ctrl+N. Optionally swallow it so it never reaches other
+  apps.
 - **Press once to talk.** An optional toggle key in settings latches the mic
   open — press it again to go back to muted.
 - **You can hear it.** Optional start/stop sound cues with a volume slider, so
@@ -82,12 +84,21 @@ The app sits in the tray. Three icon states: **Disabled**, **Muted**,
 - Right click → menu (Enable/Disable, Open settings, Quit)
 - Closing the window just hides it; the session keeps running
 
-In settings:
+The settings window is a card grid: Hotkeys, Microphone, Sounds, Overlay and
+General, with the live state, Disable/Enable and Save in the header.
 
-- **Hotkey** — press *Change*, then press any key or mouse button. Or use the
-  on-screen keyboard if you'd rather click. "Also block the key" stops the bound
-  key from reaching other apps (handy for Caps Lock, a bad idea for Shift/Ctrl/Alt
-  unless you mean it).
+In settings:
+- **Hotkeys** — two panels: *Hold to talk* and *Toggle* (press once to talk,
+  again to mute; *Clear* removes it). Press *Change*, then press any key or
+  mouse button. To bind a combination, hold the modifiers and press the final
+  key, or hold two or more modifiers and let go. To bind a modifier by itself
+  (Left Alt, say), press and release it alone. *On-screen* opens a keyboard you
+  can click instead, where you can arm modifiers to build a combination. A
+  combination gets Ctrl / Shift / Alt / Win selectors (Off, Any, Left, Right),
+  so a binding captured on the right Ctrl doesn't fire on the left one. "Block
+  key from other apps" stops the bound key from reaching other apps (handy for
+  Caps Lock, a bad idea for Shift/Ctrl/Alt unless you mean it); for a
+  combination it blocks only the final key, so Ctrl+C keeps working.
 - **Microphone** — pick a device or follow the system default.
 - **Release delay** — how long the mic stays open after you let go (default
   200 ms, so you don't clip the end of words). 0–2000 ms.
@@ -95,11 +106,14 @@ In settings:
   unmuted.
 - **Sounds** — a short cue when you start and stop talking, with a volume
   slider.
-- **Overlay** — an optional on-screen dot that shows when the mic is open,
-  for fullscreen games where the tray icon can't be seen. It's off by
-  default; the same card turns it on and picks the mode, corner and edge
-  distance. Clicks always pass through it.
-- **App** — start with Windows, start hidden in the tray.
+- **Overlay** — an optional on-screen indicator for fullscreen games where the
+  tray icon can't be seen: a small pill with a mic icon and level bars while
+  you talk. In "always" mode it stays up as a dimmed, struck-through mic while
+  muted. It's off by default; the same card turns it on and picks the mode,
+  position (top or bottom, left, center or right) and distance from the edge.
+  It sits above the taskbar, follows the primary monitor's scaling, and clicks
+  always pass through it.
+- **General** — start with Windows, start hidden in the tray.
 
 Only one hold-to-talk session at a time. If `ptt.exe ptt` is already running,
 the tray app says so instead of fighting it.
