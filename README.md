@@ -61,7 +61,7 @@ stream — the mic opens when you press and closes when you let go.
 
 ## Getting it
 
-Download `ptt-tool-vX.Y.Z-windows-x64.zip` (or the plain `.exe`, it's the same
+Download `push-to-talk-for-anywhere-vX.Y.Z-windows-x64.zip` (or the plain `.exe`, it's the same
 program) from the [Releases](https://github.com/opadips/push-to-talk-for-anywhere/releases)
 page. Unzip, run `push-to-talk-for-anywhere.exe`. That's it.
 
