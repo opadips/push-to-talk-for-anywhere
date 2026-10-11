@@ -13,8 +13,10 @@
       {
         "label": "main",
         "title": "Push-to-Talk Settings",
-        "width": 560,
-        "height": 640,
+        "minWidth": 520,
+        "minHeight": 520,
+        "width": 960,
+        "height": 700,
         "visible": false
       }
     ],

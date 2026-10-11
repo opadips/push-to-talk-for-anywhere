@@ -128,21 +128,13 @@
   ): string {
     if (bound.vk === 0 && bound.mouse_button === "") {
       return (
-        `Also block ${who} whole combination from other applications — with a ` +
-        "modifier-only combination the last modifier you press is blocked, press " +
-        "and release, while the earlier ones still reach other applications."
+        `Blocks the last modifier pressed in ${who} combination; the earlier ones still ` +
+        "reach other applications."
       );
     }
     const finalMember =
       bound.mouse_button !== "" ? "final mouse button" : "final key";
-    const phases =
-      bound.mouse_button !== ""
-        ? "its press and its release are blocked"
-        : "its press, the repeats while it is held, and its release are blocked";
-    return (
-      `Also block ${who} ${finalMember} from other applications — ${phases}, but the ` +
-      "modifiers still reach other programs (Ctrl+C keeps working)."
-    );
+    return `Blocks ${who} ${finalMember}; the modifiers still reach other applications.`;
   }
 
   let swallowCaption = $derived.by(() => {
@@ -558,7 +550,16 @@
 
 <main>
   <header>
-    <h1>Push-to-Talk</h1>
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="9" y="3" width="6" height="11" rx="3" />
+        <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+      </svg>
+      <div class="brand-text">
+        <h1>Push-to-Talk <span class="sep">//</span> Settings</h1>
+        <p class="hint">Closing this window hides it to the tray.</p>
+      </div>
+    </div>
     <div class="head">
       <span class="chip {status?.running ? status.state : "stopped"}">
         <span class="dot"></span>{stateLabel}
@@ -568,6 +569,9 @@
           {status.enabled ? "Disable" : "Enable"}
         </button>
       {/if}
+      <button class="primary" onclick={save} disabled={!dirty || busy || capturing}>
+        {busy ? "Saving…" : "Save"}
+      </button>
     </div>
   </header>
 
@@ -580,8 +584,8 @@
 
   {#snippet holdHint()}
     <p class="hold-hint">
-      A modifier is held — press the rest of your combination to bind it. To bind a single key
-      instead, release the modifier first and then press the key.
+      A modifier is held — press the rest of your combination, or release it on its own to
+      bind that modifier by itself.
     </p>
   {/snippet}
 
@@ -608,111 +612,138 @@
   {/snippet}
 
   {#if form}
-    <section>
-      <h2>Hotkey</h2>
-      <div class="row">
-        <span class="binding">{label}</span>
-        <span class="actions">
-          <button onclick={() => capture("ptt")} disabled={capturing || busy}>
-            {capturing && captureTarget === "ptt" ? "Press any key or button…" : "Change"}
-          </button>
-          <button
-            onclick={(e) => openPicker("ptt", e)}
-            disabled={capturing || busy}
-            title="Click the key on an on-screen keyboard instead of pressing it"
-          >
-            On-screen keyboard
-          </button>
-        </span>
-      </div>
-      {#if capturing && captureTarget === "ptt" && modifierHeld}
-        {@render holdHint()}
-      {/if}
-      {#if form.binding.kind === "chord"}
-        {@render sideSelectors(form.binding, "ptt")}
-        {#if chordIsUnusable(form.binding)}
-          <p class="warn">
-            This combination has no final key and fewer than two modifiers, so it is not a valid
-            binding — the hotkey falls back to the default key when you save.
-          </p>
-        {/if}
-      {/if}
-      <label class="check">
-        <input type="checkbox" bind:checked={form.binding.swallow} />
-        {swallowCaption}
-      </label>
-      {#if blocksModifier}
-        <p class="warn">
-          This key is Shift, Ctrl or Alt: blocking it stops it working in every program. Untick
-          the box above unless that is what you want.
-        </p>
-      {/if}
-      <div class="row toggle-row">
-        <span class="binding">
-          <span class="toggle-caption">Toggle key (press once to talk)</span>
-          {toggleLabel || "Not set"}
-        </span>
-        <span class="actions">
-          <button onclick={() => capture("toggle")} disabled={capturing || busy}>
-            {capturing && captureTarget === "toggle" ? "Press any key or button…" : "Change"}
-          </button>
-          <button
-            onclick={(e) => openPicker("toggle", e)}
-            disabled={capturing || busy}
-            title="Click the key on an on-screen keyboard instead of pressing it"
-          >
-            On-screen keyboard
-          </button>
-          <button onclick={clearToggle} disabled={capturing || busy}>Clear</button>
-        </span>
-      </div>
-      {#if capturing && captureTarget === "toggle" && modifierHeld}
-        {@render holdHint()}
-      {/if}
-      {#if form.toggle.kind === "chord"}
-        {@render sideSelectors(form.toggle, "toggle")}
-        {#if chordIsUnusable(form.toggle)}
-          <p class="warn">
-            This combination has no final key and fewer than two modifiers, so it is not a valid
-            binding — the toggle is left unbound when you save.
-          </p>
-        {/if}
-      {/if}
-      <label class="check">
-        <input
-          type="checkbox"
-          bind:checked={form.toggle.swallow}
-          disabled={form.toggle.kind === ""}
-        />
-        {toggleSwallowCaption}
-      </label>
-      {#if blocksToggleModifier}
-        <p class="warn">
-          This key is Shift, Ctrl or Alt: blocking it stops it working in every program. Untick
-          the box above unless that is what you want.
-        </p>
-      {/if}
-    </section>
+    <div class="grid">
+      <section class="hotkeys">
+        <h2>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="2.5" y="6" width="19" height="12" rx="2" />
+            <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" />
+          </svg>
+          <span class="num">01</span> // Hotkeys
+        </h2>
+        <div class="bindings">
+          <div class="binding-card">
+            <h3>Hold to talk</h3>
+            <span class="keycap">{label}</span>
+            <div class="bind-row">
+              <button onclick={() => capture("ptt")} disabled={capturing || busy}>
+                {capturing && captureTarget === "ptt" ? "Press a key…" : "Change"}
+              </button>
+              <button
+                onclick={(e) => openPicker("ptt", e)}
+                disabled={capturing || busy}
+                title="Click the key on an on-screen keyboard instead of pressing it"
+              >
+                On-screen
+              </button>
+            </div>
+            {#if capturing && captureTarget === "ptt" && modifierHeld}
+              {@render holdHint()}
+            {/if}
+            {#if form.binding.kind === "chord"}
+              {@render sideSelectors(form.binding, "ptt")}
+              {#if chordIsUnusable(form.binding)}
+                <p class="warn">
+                  This combination has no final key and fewer than two modifiers, so it is not a
+                  valid binding — the hotkey falls back to the default key when you save.
+                </p>
+              {/if}
+            {/if}
+            <label class="switch-row" title={swallowCaption}>
+              <span>Block key from other apps</span>
+              <input type="checkbox" class="switch" bind:checked={form.binding.swallow} />
+            </label>
+            {#if form.binding.kind === "chord"}
+              <p class="note">{swallowCaption}</p>
+            {/if}
+            {#if blocksModifier}
+              <p class="warn">
+                This key is Shift, Ctrl or Alt: blocking it stops it working in every program.
+                Turn the switch off unless that is what you want.
+              </p>
+            {/if}
+          </div>
 
-    <section>
-      <h2>Microphone</h2>
-      <label class="field">
-        <span>Device</span>
-        <select bind:value={form.audio.device_id}>
-          <option value="default">System default</option>
-          {#each devices as device (device.id)}
-            <option value={device.id}>
-              {device.name}{device.is_default ? " (system default)" : ""}
-            </option>
-          {/each}
-          {#if form.audio.device_id !== "default" && !devices.some((d) => d.id === form.audio.device_id)}
-            <option value={form.audio.device_id}>(not connected) {form.audio.device_id}</option>
-          {/if}
-        </select>
-      </label>
-      <label class="field">
-        <span>Release delay</span>
-        <span class="inline">
+          <div class="binding-card">
+            <h3>Toggle <span class="dim">- press once to talk</span></h3>
+            <span class="keycap" class:unset={form.toggle.kind === ""}>
+              {toggleLabel || "Not set"}
+            </span>
+            <div class="bind-row">
+              <button onclick={() => capture("toggle")} disabled={capturing || busy}>
+                {capturing && captureTarget === "toggle" ? "Press a key…" : "Change"}
+              </button>
+              <button
+                onclick={(e) => openPicker("toggle", e)}
+                disabled={capturing || busy}
+                title="Click the key on an on-screen keyboard instead of pressing it"
+              >
+                On-screen
+              </button>
+              <button class="link danger" onclick={clearToggle} disabled={capturing || busy}>
+                Clear
+              </button>
+            </div>
+            {#if capturing && captureTarget === "toggle" && modifierHeld}
+              {@render holdHint()}
+            {/if}
+            {#if form.toggle.kind === "chord"}
+              {@render sideSelectors(form.toggle, "toggle")}
+              {#if chordIsUnusable(form.toggle)}
+                <p class="warn">
+                  This combination has no final key and fewer than two modifiers, so it is not a
+                  valid binding — the toggle is left unbound when you save.
+                </p>
+              {/if}
+            {/if}
+            <label class="switch-row" title={toggleSwallowCaption}>
+              <span>Block toggle key from other apps</span>
+              <input
+                type="checkbox"
+                class="switch"
+                bind:checked={form.toggle.swallow}
+                disabled={form.toggle.kind === ""}
+              />
+            </label>
+            {#if form.toggle.kind === "chord"}
+              <p class="note">{toggleSwallowCaption}</p>
+            {/if}
+            {#if blocksToggleModifier}
+              <p class="warn">
+                This key is Shift, Ctrl or Alt: blocking it stops it working in every program.
+                Turn the switch off unless that is what you want.
+              </p>
+            {/if}
+          </div>
+        </div>
+      </section>
+
+      <section class="mic">
+        <h2>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="3" width="6" height="11" rx="3" />
+            <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+          </svg>
+          <span class="num">02</span> // Microphone
+        </h2>
+        <label class="field">
+          <span class="label">Device</span>
+          <select bind:value={form.audio.device_id}>
+            <option value="default">System default</option>
+            {#each devices as device (device.id)}
+              <option value={device.id}>
+                {device.name}{device.is_default ? " (system default)" : ""}
+              </option>
+            {/each}
+            {#if form.audio.device_id !== "default" && !devices.some((d) => d.id === form.audio.device_id)}
+              <option value={form.audio.device_id}>(not connected) {form.audio.device_id}</option>
+            {/if}
+          </select>
+        </label>
+        <label class="field">
+          <span class="label">
+            Release delay <span class="value">{form.audio.release_delay_ms} ms</span>
+          </span>
           <input
             type="range"
             min="0"
@@ -720,27 +751,31 @@
             step="10"
             bind:value={form.audio.release_delay_ms}
           />
-          <span class="value">{form.audio.release_delay_ms} ms</span>
-        </span>
-      </label>
-      <label class="field">
-        <span>On exit</span>
-        <select bind:value={form.audio.on_exit}>
-          <option value="restore">Hand the microphone back as it was found</option>
-          <option value="unmute">Always leave it unmuted</option>
-        </select>
-      </label>
-    </section>
+        </label>
+        <label class="field">
+          <span class="label">On exit</span>
+          <select bind:value={form.audio.on_exit}>
+            <option value="restore">Hand the microphone back as it was found</option>
+            <option value="unmute">Always leave it unmuted</option>
+          </select>
+        </label>
+      </section>
 
-    <section>
-      <h2>Sounds</h2>
-      <label class="check">
-        <input type="checkbox" bind:checked={form.sounds.enabled} />
-        Play the talk / release sounds
-      </label>
-      <label class="field">
-        <span>Volume</span>
-        <span class="inline">
+      <section class="sounds">
+        <h2>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM16 9a4.5 4.5 0 0 1 0 6" />
+          </svg>
+          <span class="num">03</span> // Sounds
+        </h2>
+        <label class="switch-row">
+          <span>Play the talk / release sounds</span>
+          <input type="checkbox" class="switch" bind:checked={form.sounds.enabled} />
+        </label>
+        <label class="field">
+          <span class="label">
+            Volume <span class="value">{Math.round(form.sounds.volume * 100)}%</span>
+          </span>
           <input
             type="range"
             min="0"
@@ -749,38 +784,45 @@
             bind:value={form.sounds.volume}
             disabled={!form.sounds.enabled}
           />
-          <span class="value">{Math.round(form.sounds.volume * 100)}%</span>
-        </span>
-      </label>
-    </section>
+        </label>
+      </section>
 
-    <section>
-      <h2>Overlay</h2>
-      <label class="check">
-        <input type="checkbox" bind:checked={form.overlay.enabled} />
-        Show an on-screen dot while talking (clicks pass through it)
-      </label>
-      <label class="field">
-        <span>Show</span>
-        <select bind:value={form.overlay.mode} disabled={!form.overlay.enabled}>
-          <option value="talk-only">Only while talking</option>
-          <option value="always">Always (dim while muted)</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Position</span>
-        <select bind:value={form.overlay.position} disabled={!form.overlay.enabled}>
-          <option value="top-left">Top left</option>
-          <option value="top-center">Top center</option>
-          <option value="top-right">Top right</option>
-          <option value="bottom-left">Bottom left</option>
-          <option value="bottom-center">Bottom center</option>
-          <option value="bottom-right">Bottom right</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Distance from edge</span>
-        <span class="inline">
+      <section class="overlay">
+        <h2>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="13" rx="2" />
+            <path d="M9 21h6M12 17v4" />
+          </svg>
+          <span class="num">04</span> // Overlay
+        </h2>
+        <label class="switch-row" title="Clicks pass through the dot">
+          <span>On-screen dot while talking</span>
+          <input type="checkbox" class="switch" bind:checked={form.overlay.enabled} />
+        </label>
+        <div class="pair">
+          <label class="field">
+            <span class="label">Show</span>
+            <select bind:value={form.overlay.mode} disabled={!form.overlay.enabled}>
+              <option value="talk-only">Only while talking</option>
+              <option value="always">Always (dim while muted)</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="label">Position</span>
+            <select bind:value={form.overlay.position} disabled={!form.overlay.enabled}>
+              <option value="top-left">Top left</option>
+              <option value="top-center">Top center</option>
+              <option value="top-right">Top right</option>
+              <option value="bottom-left">Bottom left</option>
+              <option value="bottom-center">Bottom center</option>
+              <option value="bottom-right">Bottom right</option>
+            </select>
+          </label>
+        </div>
+        <label class="field">
+          <span class="label">
+            Distance from edge <span class="value">{form.overlay.distance} px</span>
+          </span>
           <input
             type="range"
             min="0"
@@ -789,22 +831,26 @@
             bind:value={form.overlay.distance}
             disabled={!form.overlay.enabled}
           />
-          <span class="value">{form.overlay.distance} px</span>
-        </span>
-      </label>
-    </section>
+        </label>
+      </section>
 
-    <section>
-      <h2>App</h2>
-      <label class="check">
-        <input type="checkbox" bind:checked={form.app.start_with_windows} />
-        Start with Windows
-      </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={form.app.start_hidden} />
-        Start hidden in the tray
-      </label>
-    </section>
+      <section class="general">
+        <h2>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 8h13M14 5l3 3-3 3M20 16H7M10 13l-3 3 3 3" />
+          </svg>
+          <span class="num">05</span> // General
+        </h2>
+        <label class="switch-row">
+          <span>Start with Windows</span>
+          <input type="checkbox" class="switch" bind:checked={form.app.start_with_windows} />
+        </label>
+        <label class="switch-row">
+          <span>Start hidden in the tray</span>
+          <input type="checkbox" class="switch" bind:checked={form.app.start_hidden} />
+        </label>
+      </section>
+    </div>
   {:else}
     <p class="placeholder">Loading settings…</p>
   {/if}
@@ -820,75 +866,143 @@
       onclose={closePicker}
     />
   {/if}
-
-  <footer>
-    <span class="hint">Closing this window hides it to the tray.</span>
-    <button class="primary" onclick={save} disabled={!dirty || busy || capturing}>
-      {busy ? "Saving…" : "Save"}
-    </button>
-  </footer>
 </main>
 
 <style>
+  :global(html) {
+    font-size: 13px;
+  }
   :global(body) {
     margin: 0;
-    background: #14161a;
+    background: #0e1013;
     color: #e8eaed;
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --accent: #6fd39a;
+    --accent-ink: #0a1d12;
+    --card: #14171b;
+    --inset: #0e1013;
+    --line: #23272d;
+    --line-strong: #33383f;
+    --muted: #9aa0a6;
+    --dim: #868c94;
+  }
+  :global(::selection) {
+    background: #2f6b45;
+    color: #fff;
   }
   main {
-    padding: 1.25rem 1.5rem 1rem;
+    padding: 1rem 1.25rem 1.25rem;
     display: flex;
     flex-direction: column;
-    gap: 0.85rem;
+    gap: 0.9rem;
+    min-height: 100vh;
+    box-sizing: border-box;
   }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
+    flex-wrap: wrap;
+    padding-bottom: 0.3rem;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    min-width: 0;
+  }
+  .brand-icon {
+    width: 1.5rem;
+    height: 1.5rem;
+    flex: none;
+  }
+  svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
   h1 {
-    font-size: 1.2rem;
+    font-size: 1.05rem;
     margin: 0;
-  }
-  h2 {
-    font-size: 0.75rem;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #9aa0a6;
-    margin: 0 0 0.6rem;
-    font-weight: 600;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+  }
+  .sep {
+    font-weight: 400;
+    color: var(--muted);
+  }
+  .hint {
+    margin: 0.1rem 0 0;
+    color: var(--dim);
+    font-size: 0.78rem;
   }
   .head {
     display: flex;
     align-items: center;
     gap: 0.6rem;
   }
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin: 0 0 0.9rem;
+    font-weight: 600;
+  }
+  h2 svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    flex: none;
+    margin-right: 0.15rem;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  h3 {
+    margin: 0 0 0.6rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .dim {
+    color: var(--dim);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+  }
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    padding: 0.25rem 0.6rem;
+    gap: 0.45rem;
+    padding: 0.3rem 0.8rem;
     border-radius: 999px;
-    background: #1e2126;
-    border: 1px solid #2c3036;
-    font-size: 0.85rem;
+    background: var(--card);
+    border: 1px solid var(--line-strong);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .dot {
-    width: 0.55rem;
-    height: 0.55rem;
+    width: 0.5rem;
+    height: 0.5rem;
     border-radius: 50%;
     background: #5f6368;
   }
   .chip.talking .dot {
-    background: #81c995;
+    background: var(--accent);
   }
   .chip.muted .dot {
     background: #f28b82;
-  }
-  .chip.disabled .dot {
-    background: #5f6368;
   }
   .banner {
     padding: 0.6rem 0.75rem;
@@ -904,181 +1018,305 @@
     border-color: #6e3128;
     color: #f5c9c4;
   }
-  section {
-    background: #191c21;
-    border: 1px solid #24282e;
-    border-radius: 10px;
-    padding: 0.9rem 1rem;
+
+  /* --- card grid ------------------------------------------------------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.9rem;
+    align-items: stretch;
   }
-  .row {
+  section {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.95rem 1.05rem 1.05rem;
+  }
+  .hotkeys {
+    grid-column: span 2;
+  }
+  .bindings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+  .binding-card {
+    background: var(--inset);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.75rem 0.8rem 0.85rem;
+    min-width: 0;
+  }
+  .bind-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-bottom: 0.8rem;
+  }
+  .keycap {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.1rem;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0.2rem 0.85rem;
+    margin-bottom: 0.6rem;
+    background: #1a1d22;
+    border: 1px solid var(--line-strong);
+    border-bottom-width: 2px;
+    border-radius: 7px;
+    font-size: 1rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+  }
+  .keycap.unset {
+    color: var(--dim);
+    font-weight: 500;
+    border-style: dashed;
+  }
+  .switch-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
+    gap: 0.75rem;
+    font-size: 0.88rem;
+    color: #d3d7dc;
+    padding: 0.35rem 0;
   }
-  .binding {
-    font-size: 1.05rem;
-    font-weight: 600;
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: 0.88rem;
+    margin-top: 0.8rem;
     min-width: 0;
-    overflow-wrap: anywhere;
   }
-  .warn {
-    margin: 0.6rem 0 0;
+  .field:first-of-type {
+    margin-top: 0;
+  }
+  .label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  .value {
+    color: #e8eaed;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+    margin-top: 0.8rem;
+  }
+  .pair .field {
+    margin-top: 0;
+  }
+  .warn,
+  .hold-hint,
+  .note {
+    margin: 0.5rem 0 0;
+    font-size: 0.78rem;
+    line-height: 1.4;
+  }
+  .note {
+    color: var(--dim);
+  }
+  .warn,
+  .hold-hint {
     padding: 0.5rem 0.65rem;
     border-radius: 8px;
+  }
+  .warn {
     background: #2b2616;
     border: 1px solid #5d4e1f;
     color: #f0dca0;
-    font-size: 0.82rem;
-    line-height: 1.35;
-  }
-  .actions {
-    display: flex;
-    flex: 0 0 auto;
-    gap: 0.5rem;
-  }
-  .toggle-row {
-    margin-top: 0.85rem;
-    padding-top: 0.85rem;
-    border-top: 1px solid #24282e;
-  }
-  .toggle-caption {
-    display: block;
-    font-size: 0.78rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: #9aa0a6;
-    margin-bottom: 0.15rem;
-  }
-  .check {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.9rem;
-    color: #c9cdd2;
-    margin-top: 0.7rem;
   }
   .hold-hint {
-    margin: 0.6rem 0 0;
-    padding: 0.5rem 0.65rem;
-    border-radius: 8px;
+    margin: 0 0 0.8rem;
     background: #16202b;
     border: 1px solid #2c3d51;
     color: #c4d6e8;
-    font-size: 0.82rem;
-    line-height: 1.35;
   }
   .sides {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.55rem 1.1rem;
-    margin-top: 0.7rem;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem 0.9rem;
+    margin-bottom: 0.7rem;
   }
   .side {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 0.4rem;
-    font-size: 0.85rem;
-    color: #c9cdd2;
   }
   .side > span {
-    min-width: 3rem;
-    font-size: 0.78rem;
-    font-weight: 500;
+    font-size: 0.72rem;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: #9aa0a6;
+    color: var(--muted);
   }
   .side select {
-    flex: 0 0 auto;
-    max-width: none;
-    padding: 0.3rem 0.45rem;
-    font-size: 0.85rem;
+    width: 5.5rem;
+    padding: 0.25rem 0.4rem;
+    font-size: 0.82rem;
   }
-  .field {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    font-size: 0.9rem;
-    color: #c9cdd2;
-    margin-top: 0.55rem;
-  }
-  .field > span:first-child {
-    flex: 0 0 auto;
-  }
-  .inline {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex: 1;
-    justify-content: flex-end;
-  }
-  .inline input[type="range"] {
-    flex: 1;
-    max-width: 12rem;
-  }
-  .value {
-    min-width: 4.2rem;
-    text-align: right;
-    color: #e8eaed;
-    font-variant-numeric: tabular-nums;
-  }
+
+  /* --- controls -------------------------------------------------------- */
   select {
-    flex: 1;
-    max-width: 20rem;
-    background: #14161a;
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--inset);
     color: #e8eaed;
-    border: 1px solid #2c3036;
-    border-radius: 6px;
-    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    padding: 0.5rem 0.6rem;
     font: inherit;
+    font-size: 0.88rem;
+  }
+  select:disabled,
+  input:disabled {
+    opacity: 0.45;
   }
   input[type="range"] {
-    accent-color: #81c995;
+    appearance: none;
+    width: 100%;
+    height: 1.1rem;
+    margin: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--line-strong);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    width: 0.95rem;
+    height: 0.95rem;
+    margin-top: calc(2px - 0.475rem);
+    border-radius: 50%;
+    background: #e8eaed;
+    border: 0;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+  }
+  input[type="range"]:hover:not(:disabled)::-webkit-slider-thumb {
+    background: var(--accent);
+  }
+  .switch {
+    appearance: none;
+    flex: none;
+    width: 2.4rem;
+    height: 1.3rem;
+    margin: 0;
+    border-radius: 999px;
+    background: #2a2e34;
+    border: 1px solid var(--line-strong);
+    position: relative;
+    cursor: pointer;
+    transition: background 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 0.17rem;
+    width: 0.9rem;
+    height: 0.9rem;
+    border-radius: 50%;
+    background: #c9cdd2;
+    transform: translateY(-50%);
+    transition:
+      left 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+      background 0.18s;
+  }
+  .switch:checked {
+    background: #2f8f5b;
+    border-color: #3fa86e;
+  }
+  .switch:checked::after {
+    left: calc(100% - 1.07rem);
+    background: #fff;
+  }
+  .switch:disabled {
+    cursor: default;
   }
   button {
-    background: #23272d;
+    background: #1c2025;
     color: #e8eaed;
-    border: 1px solid #343a41;
+    border: 1px solid var(--line-strong);
     border-radius: 7px;
     padding: 0.42rem 0.85rem;
     font: inherit;
-    font-size: 0.88rem;
+    font-size: 0.84rem;
     cursor: pointer;
   }
   button:hover:not(:disabled) {
-    background: #2b3037;
+    background: #262b32;
   }
   button:disabled {
-    opacity: 0.55;
+    opacity: 0.5;
     cursor: default;
   }
   button.primary {
-    background: #2f6b45;
-    border-color: #3d8a59;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0.55rem 1.8rem;
   }
   button.primary:hover:not(:disabled) {
-    background: #377c51;
+    background: #86e0ac;
+  }
+  button.primary:disabled {
+    opacity: 0.8;
+  }
+  button.link {
+    background: none;
+    border-color: transparent;
+    padding-inline: 0.4rem;
+  }
+  button.danger {
+    color: #f28b82;
+  }
+  button.danger:hover:not(:disabled) {
+    background: #2c1a19;
   }
   .toggle {
-    font-size: 0.82rem;
-    padding: 0.3rem 0.7rem;
+    font-weight: 600;
   }
-  footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-top: 0.15rem;
-  }
-  .hint {
-    color: #767c83;
-    font-size: 0.8rem;
+  :global(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .placeholder {
-    color: #9aa0a6;
+    color: var(--muted);
+  }
+
+  @media (max-width: 860px) {
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .hotkeys {
+      grid-column: span 2;
+    }
+  }
+  @media (max-width: 560px) {
+    .grid,
+    .bindings,
+    .pair {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .hotkeys {
+      grid-column: auto;
+    }
   }
 </style>
