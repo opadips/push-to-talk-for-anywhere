@@ -6,13 +6,18 @@ use crate::app::AppState;
 use ptt_core::config::OverlayConfig;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 use tracing::warn;
 
-/// The badge window's label and its size in logical pixels (the spec's
-/// 64×64 — the dot plus its glow padding).
+/// The badge window's label and its size in logical pixels. The pill the
+/// page draws fills the window edge to edge, so the configured distance is
+/// the distance between the visible badge and the screen edge.
 const OVERLAY_LABEL: &str = "overlay";
-const OVERLAY_SIZE: f64 = 64.0;
+const OVERLAY_W: f64 = 76.0;
+const OVERLAY_H: f64 = 36.0;
 
 /// The overlay config the existing window was built with — `None` while a
 /// destroy/rebuild is in flight. Change-gates [`sync_overlay`] so an
@@ -140,20 +145,22 @@ fn sync_on_main_thread(app: &AppHandle) {
     }
 }
 
-/// Build the badge window at its configured spot (the page starts with an
-/// invisible dot, so a fresh window never flashes).
+/// Build the badge window and put it at its configured spot. The window is
+/// created hidden, sized and placed in *physical* pixels from the primary
+/// monitor's own scale factor, and only then shown — a logical position or
+/// size would be converted with the scale of whichever monitor the window
+/// happens to start on, which put the badge in the wrong place on mixed-DPI
+/// setups. After this it is never hidden again: a hidden WebView2 stops
+/// painting, so the first frame after a `show()` could be a stale one.
 fn create(app: &AppHandle, overlay: &OverlayConfig) {
-    let Some((x, y)) = badge_xy(app, overlay) else {
-        return;
-    };
-
     let window =
         WebviewWindowBuilder::new(app, OVERLAY_LABEL, WebviewUrl::App("overlay.html".into()))
-            .inner_size(OVERLAY_SIZE, OVERLAY_SIZE)
-            .position(x, y)
+            .inner_size(OVERLAY_W, OVERLAY_H)
+            .visible(false)
             .transparent(true)
             .decorations(false)
             .shadow(false)
+            .resizable(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .focused(false)
@@ -167,6 +174,10 @@ fn create(app: &AppHandle, overlay: &OverlayConfig) {
             if let Err(error) = window.set_ignore_cursor_events(true) {
                 warn!("the overlay badge is NOT click-through: {error}");
             }
+            place(app, &window, overlay);
+            if let Err(error) = window.show() {
+                warn!("showing the overlay window: {error}");
+            }
             *APPLIED.lock().unwrap() = Some(overlay.clone());
         }
         Err(error) => {
@@ -177,22 +188,26 @@ fn create(app: &AppHandle, overlay: &OverlayConfig) {
     }
 }
 
-/// Move an existing badge (position/distance change without a mode change).
+/// Size and move the badge (also used for position/distance changes without
+/// a mode change), all in physical pixels.
 fn place(app: &AppHandle, window: &WebviewWindow, overlay: &OverlayConfig) {
-    if let Some((x, y)) = badge_xy(app, overlay) {
-        if let Err(error) = window.set_position(LogicalPosition::new(x, y)) {
-            warn!("moving the overlay window: {error}");
-        }
+    let Some((x, y, w, h)) = badge_rect(app, overlay) else {
+        return;
+    };
+    if let Err(error) = window.set_size(PhysicalSize::new(w, h)) {
+        warn!("sizing the overlay window: {error}");
+    }
+    if let Err(error) = window.set_position(PhysicalPosition::new(x, y)) {
+        warn!("moving the overlay window: {error}");
     }
 }
 
-/// The badge's logical top-left corner on the primary monitor — or, when
-/// there is none, on whatever monitor the settings window is on, shifted
-/// into that monitor's screen coordinates (multi-monitor remains a spec
-/// non-goal; this only keeps the badge reachable). Positions are logical
-/// pixels: the builder and `set_position` take logical coordinates, the
-/// monitors report physical size plus a scale factor.
-fn badge_xy(app: &AppHandle, overlay: &OverlayConfig) -> Option<(f64, f64)> {
+/// The badge's physical rectangle `(x, y, width, height)` on the primary
+/// monitor — or, when there is none, on whatever monitor the settings
+/// window is on (multi-monitor remains a spec non-goal; this only keeps the
+/// badge reachable). It is placed inside the monitor's *work area*, so a
+/// badge at the bottom edge sits above the taskbar instead of under it.
+fn badge_rect(app: &AppHandle, overlay: &OverlayConfig) -> Option<(i32, i32, u32, u32)> {
     let monitor = match app.primary_monitor() {
         Ok(Some(monitor)) => Some(monitor),
         Ok(None) => app
@@ -209,35 +224,44 @@ fn badge_xy(app: &AppHandle, overlay: &OverlayConfig) -> Option<(f64, f64)> {
     };
 
     let scale = monitor.scale_factor();
-    let screen_w = (f64::from(monitor.size().width) / scale).round() as u32;
-    let screen_h = (f64::from(monitor.size().height) / scale).round() as u32;
-    let (x, y) = overlay_position(&overlay.position, overlay.distance, screen_w, screen_h);
-    // The primary monitor's origin is (0,0); a fallback monitor's is not.
-    let origin_x = f64::from(monitor.position().x) / scale;
-    let origin_y = f64::from(monitor.position().y) / scale;
-    Some((origin_x + x, origin_y + y))
+    let area = monitor.work_area();
+    let w = (OVERLAY_W * scale).round() as u32;
+    let h = (OVERLAY_H * scale).round() as u32;
+    let distance = (f64::from(overlay.distance) * scale).round() as i32;
+    let (x, y) = overlay_position(
+        &overlay.position,
+        distance,
+        (area.size.width, area.size.height),
+        (w, h),
+    );
+    Some((area.position.x + x, area.position.y + y, w, h))
 }
 
-/// The badge's top-left corner for the given edge — `distance` logical
-/// pixels from the screen edges; `*_center` centers on the horizontal
-/// axis. Unknown values were already normalized by `Config::validate`.
-fn overlay_position(position: &str, distance: u32, screen_w: u32, screen_h: u32) -> (f64, f64) {
-    let d = f64::from(distance);
-    let w = f64::from(screen_w);
-    let h = f64::from(screen_h);
+/// The badge's top-left corner inside an `area` (width, height) for the
+/// given edge — `distance` pixels from the edges; `*_center` centers on the
+/// horizontal axis. Unknown values were already normalized by
+/// `Config::validate`. Everything is in physical pixels.
+fn overlay_position(
+    position: &str,
+    distance: i32,
+    area: (u32, u32),
+    badge: (u32, u32),
+) -> (i32, i32) {
+    let (aw, ah) = (area.0 as i32, area.1 as i32);
+    let (bw, bh) = (badge.0 as i32, badge.1 as i32);
 
     let x = match position {
-        "top-left" | "bottom-left" => d,
-        "top-center" | "bottom-center" => (w - OVERLAY_SIZE) / 2.0,
+        "top-left" | "bottom-left" => distance,
+        "top-center" | "bottom-center" => (aw - bw) / 2,
         // `top-right`, `bottom-right` and anything unvalidated.
-        _ => w - OVERLAY_SIZE - d,
+        _ => aw - bw - distance,
     };
     let y = if position.starts_with("top") {
-        d
+        distance
     } else {
-        h - OVERLAY_SIZE - d
+        ah - bh - distance
     };
-    (x, y)
+    (x.max(0), y.max(0))
 }
 
 #[cfg(test)]
@@ -246,27 +270,21 @@ mod tests {
 
     #[test]
     fn positions_place_the_badge_on_the_requested_edge() {
-        // 64x64 window, 1920x1080 screen, distance 24.
+        // 76x36 badge, 1920x1040 work area, distance 24.
+        let (area, badge) = ((1920, 1040), (76, 36));
+        assert_eq!(overlay_position("bottom-right", 24, area, badge), (1820, 980));
+        assert_eq!(overlay_position("bottom-left", 24, area, badge), (24, 980));
+        assert_eq!(overlay_position("top-left", 24, area, badge), (24, 24));
+        assert_eq!(overlay_position("top-right", 24, area, badge), (1820, 24));
+        assert_eq!(overlay_position("top-center", 24, area, badge), (922, 24));
+        assert_eq!(overlay_position("bottom-center", 24, area, badge), (922, 980));
+    }
+
+    #[test]
+    fn a_huge_distance_never_pushes_the_badge_off_screen() {
         assert_eq!(
-            overlay_position("bottom-right", 24, 1920, 1080),
-            (1832.0, 992.0)
-        );
-        assert_eq!(
-            overlay_position("bottom-left", 24, 1920, 1080),
-            (24.0, 992.0)
-        );
-        assert_eq!(overlay_position("top-left", 24, 1920, 1080), (24.0, 24.0));
-        assert_eq!(
-            overlay_position("top-right", 24, 1920, 1080),
-            (1832.0, 24.0)
-        );
-        assert_eq!(
-            overlay_position("top-center", 24, 1920, 1080),
-            (928.0, 24.0)
-        );
-        assert_eq!(
-            overlay_position("bottom-center", 24, 1920, 1080),
-            (928.0, 992.0)
+            overlay_position("bottom-right", 5000, (800, 600), (76, 36)),
+            (0, 0)
         );
     }
 

@@ -6,7 +6,14 @@
     <link rel="stylesheet" href="/src/overlay.css" />
   </head>
   <body>
-    <div id="dot" aria-hidden="true"></div>
+    <div id="badge" aria-hidden="true">
+      <svg viewBox="0 0 24 24">
+        <rect x="9" y="3" width="6" height="11" rx="3" />
+        <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+        <path class="slash" d="M4 4l16 16" />
+      </svg>
+      <span class="bars"><i></i><i></i><i></i><i></i></span>
+    </div>
     <script type="module" src="/src/overlay.ts"></script>
   </body>
 </html>

@@ -796,7 +796,7 @@
           <span class="num">04</span> // Overlay
         </h2>
         <label class="switch-row" title="Clicks pass through the dot">
-          <span>On-screen dot while talking</span>
+          <span>On-screen indicator while talking</span>
           <input type="checkbox" class="switch" bind:checked={form.overlay.enabled} />
         </label>
         <div class="pair">

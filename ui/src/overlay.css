@@ -1,6 +1,7 @@
-/* The badge window is a transparent 64x64 box: only the dot paints.
-   Keeping the document background fully transparent is what makes the
-   window read as "nothing but a dot" (spec: no white box, no shadow). */
+/* The badge window is a transparent box exactly the size of the pill the
+   page draws, so the configured distance from the screen edge is the
+   distance to the visible badge. Everything outside the pill stays fully
+   transparent: no white box, no shadow around the window. */
 
 html,
 body {
@@ -8,45 +9,109 @@ body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   /* Belt and braces: the window is click-through at the Win32 level. */
   pointer-events: none;
   user-select: none;
 }
 
-#dot {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
+#badge {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 999px;
+  background: #0f1317;
+  box-shadow: inset 0 0 0 1.5px #6fd39a;
+  color: #6fd39a;
+  /* Hidden until a state class arrives. The window itself is never hidden:
+     the pill fades in and out, which also keeps it painting accurately. */
   opacity: 0;
-  /* The talk-only fade-out: the class leaves, the dot breathes out over
-     300ms, and the page hides the window once the transition is done. */
-  transition: opacity 300ms ease;
+  transform: scale(0.88);
+  transition:
+    opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 180ms ease,
+    color 180ms ease;
 }
 
-/* Talking (and the release delay while the mic is still open): a bright
-   pulsing dot. */
-#dot.talking {
+#badge svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.slash {
+  opacity: 0;
+}
+
+.bars {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+}
+
+.bars i {
+  display: block;
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: currentColor;
+  transform: scaleY(0.25);
+  transform-origin: center;
+}
+
+/* Talking (and the release delay while the mic is still open). */
+#badge.talking {
   opacity: 1;
-  background: #ef4444;
-  box-shadow: 0 0 12px 4px rgb(239 68 68 / 0.7);
-  animation: pulse 1.2s ease-in-out infinite;
+  transform: scale(1);
 }
 
-/* "always" mode while muted: a dim static dot, no animation. */
-#dot.dim {
+#badge.talking .bars i {
+  animation: level 900ms ease-in-out infinite;
+}
+#badge.talking .bars i:nth-child(2) {
+  animation-delay: -300ms;
+}
+#badge.talking .bars i:nth-child(3) {
+  animation-delay: -600ms;
+}
+#badge.talking .bars i:nth-child(4) {
+  animation-delay: -150ms;
+}
+
+/* "always" mode while muted: a quiet, struck-through mic. */
+#badge.dim {
+  opacity: 0.85;
+  transform: scale(1);
+  color: #8a9199;
+  box-shadow: inset 0 0 0 1.5px #3a4048;
+}
+#badge.dim .slash {
   opacity: 1;
-  background: #6b7280;
 }
 
-@keyframes pulse {
+@keyframes level {
   0%,
   100% {
-    transform: scale(1);
+    transform: scaleY(0.25);
   }
   50% {
-    transform: scale(0.72);
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #badge.talking .bars i {
+    animation: none;
+    transform: scaleY(0.7);
   }
 }
