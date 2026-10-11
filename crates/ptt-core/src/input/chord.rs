@@ -413,19 +413,30 @@ pub struct ChordState {
 }
 
 impl ChordState {
-    /// Forget everything: no chord is active, blocked or mid-completion.
+    /// Forget everything: no chord is active, blocked or mid-completion —
+    /// and report whether a chord **was** engaged when it happened.
     ///
-    /// This is the recovery path for a lost release event. Windows *does*
-    /// drop low-level hooks, so the release that would have cleared
-    /// [`ChordState::blocked`] may never arrive — the chord would then be
-    /// dead until a restart or a rebind. It is meant to be called on session
-    /// start and after rehooking, together with
+    /// `true` means the hook owes that chord its `BindingUp`: an engaged
+    /// chord has already emitted `BindingDown`, and once the state is
+    /// cleared the key-up that should end the talk hits an inactive chord
+    /// — [`ChordMatcher::step`] answers nothing for it — so without the
+    /// emission the microphone would stay open forever (the hot mic a
+    /// `rehook()` used to cause). `blocked` reports `false`: `Released`
+    /// was already emitted when the chord ended, nothing is outstanding.
+    ///
+    /// This is also the recovery path for a lost release event. Windows
+    /// *does* drop low-level hooks, so the release that would have
+    /// cleared [`ChordState::blocked`] may never arrive — the chord would
+    /// then be dead until a restart or a rebind. It is meant to be called
+    /// on session start and after rehooking, together with
     /// [`ChordMatcher::clear_last`] and a `GetAsyncKeyState` resync of the
     /// held modifiers.
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> bool {
+        let was_active = self.active;
         self.active = false;
         self.blocked = false;
         self.completing = None;
+        was_active
     }
 }
 
@@ -643,6 +654,36 @@ impl ChordMatcher {
         }
     }
 
+    /// Whether the event last noted must be swallowed even though
+    /// [`ChordMatcher::step`] reports no outcome for it, because the chord
+    /// is [`ChordState::blocked`]: it ended when a modifier was released
+    /// while its final key or button was still held, and *that member's*
+    /// press was swallowed when the chord engaged. Its auto-repeat downs
+    /// **and** its eventual release therefore have to be swallowed too —
+    /// forwarding either would leave the focused application holding a
+    /// key-down nothing ever balances. `step` answers `None` for both
+    /// halves (it only clears `blocked`), which is exactly why the swallow
+    /// decision needs this sibling of [`ChordMatcher::swallows_repeat`].
+    ///
+    /// **Ask this before [`ChordMatcher::step`]**, like `swallows_repeat`:
+    /// `step` clears `blocked` when the final member's release arrives, so
+    /// asking afterwards would be too late for the release half.
+    ///
+    /// Only that one member is ever swallowed: unrelated keys, member
+    /// modifiers' presses and releases, and every other event stay
+    /// forwarded (`Ctrl+C` keeps working while `Ctrl+N` is blocked), and
+    /// with `swallow: false` nothing is swallowed at all — the binding's
+    /// own flag decides, exactly as in `step`.
+    pub fn swallows_while_blocked(&self, chord: &Chord, swallow: bool, state: &ChordState) -> bool {
+        if !swallow || !state.blocked {
+            return false;
+        }
+        match self.last {
+            Some(note) => is_press_of_final(note, chord) || is_release_of_final(note, chord),
+            None => false,
+        }
+    }
+
     /// Every role of `chord` matches the held slots exactly (spec §4).
     fn modifiers_match(&self, chord: &Chord) -> bool {
         chord
@@ -700,6 +741,20 @@ fn is_release_of_final(note: Note, chord: &Chord) -> bool {
             },
             Some(ChordKey::Mouse(bound)),
         ) => button == bound,
+        _ => false,
+    }
+}
+
+/// Whether `note` is a *press* of the chord's final key or button — the
+/// mirror of [`is_release_of_final`]. While the chord is engaged that
+/// member is still down, so such a press is its auto-repeat; while the
+/// chord is [`ChordState::blocked`] it is either that repeat or, should
+/// Windows have dropped the release, a re-press — swallowed either way
+/// (see [`ChordMatcher::swallows_while_blocked`]).
+fn is_press_of_final(note: Note, chord: &Chord) -> bool {
+    match (note, chord.key) {
+        (Note::Key { down: true, vk, .. }, Some(ChordKey::Key { vk: bound, .. })) => vk == bound,
+        (Note::Mouse { down: true, button }, Some(ChordKey::Mouse(bound))) => button == bound,
         _ => false,
     }
 }
@@ -1760,6 +1815,117 @@ mod tests {
     }
 
     #[test]
+    fn reset_reports_whether_an_engaged_chord_owes_a_binding_up() {
+        // The hook-side half of the hot-mic bug: `reset` clears the state,
+        // and the key-up that should end the talk then finds an inactive
+        // chord — `step` answers nothing — so the hook must emit the
+        // `BindingUp` itself. It can only do that if `reset` tells it a
+        // chord *was* engaged: exactly the resets worth emitting (rehook,
+        // rebind) read this flag; start and stop deliberately do not.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        assert!(!state.reset(), "a fresh state owes nobody an up");
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        assert!(
+            state.reset(),
+            "an engaged chord must report itself, or the hook cannot emit its up"
+        );
+        assert!(
+            !state.reset(),
+            "a second reset owes nothing — no double BindingUp"
+        );
+
+        // A chord that already ended — even one left `blocked`, whose
+        // `Released` was already emitted — reports `false`: nothing is
+        // outstanding for the engine.
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // Ctrl first: N still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        assert!(
+            !state.reset(),
+            "already released, only blocked — no up owed"
+        );
+
+        // The same for a modifier-only chord: engagement reports, release
+        // does not.
+        let chord = ctrl_shift_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        assert!(state.reset(), "an engaged modifier-only chord reports too");
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x10, SCAN_LSHIFT));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // the non-completing member
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        assert!(!state.reset(), "released again — nothing outstanding");
+    }
+
+    #[test]
+    fn after_a_reset_the_held_final_keys_release_owes_nobody_anything() {
+        // The runtime fact the hook's reset sites are built on (rehook and
+        // rebind): once `reset` has run, the key-up of the chord's final
+        // key — still held from before, its press swallowed at engagement —
+        // finds an inactive chord and answers nothing. That is why the
+        // reset site must emit `BindingUp` itself, the microphone would
+        // stay open otherwise; and it is also why the focused application
+        // receives that key-up although it never saw the key-down: the
+        // swallow promise for it lived in the `blocked` state the reset
+        // deliberately clears (spec §5's lost-release guard), and
+        // re-deriving it there would let a release Windows dropped eat the
+        // user's next real press of the key.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        assert!(state.reset(), "engaged — the hook owes the up itself now");
+
+        matcher.note_key(up(0x4E, 49)); // N, still held from before, released
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "no `Released`: the `BindingUp` was already emitted at the reset"
+        );
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "and no swallow — after the reset the application receives the \
+             unbalanced key-up (the accepted cost documented at `rehook`)"
+        );
+    }
+
+    #[test]
     fn clear_last_forgets_a_pre_rebind_note() {
         // A matcher reused across a rebind must not engage the fresh binding
         // off a note observed before the rebind.
@@ -2598,10 +2764,16 @@ mod tests {
             !matcher.swallows_repeat(&chord, true, &state),
             "a down of the bound key with no chord engaged is ordinary typing"
         );
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "and it never blocked either, so the blocked predicate declines too"
+        );
 
         // And once the chord ended mid-press — Ctrl released while N is
-        // still down — N's repeats are ordinary input again, or the chord
-        // would keep eating `N` long after it stopped talking.
+        // still down — the chord is no longer *engaged*, so this
+        // engaged-only predicate declines. What still swallows N in that
+        // window is `swallows_while_blocked`, pinned below: N's press was
+        // swallowed at engagement, so its repeats and release must be too.
         matcher.note_key(up(0x4E, 49));
         matcher.note_key(down(0x11, 0)); // Ctrl
         matcher.note_key(down(0x4E, 49)); // N
@@ -2617,7 +2789,11 @@ mod tests {
         matcher.note_key(down(0x4E, 49)); // N's repeat after the release
         assert!(
             !matcher.swallows_repeat(&chord, true, &state),
-            "the chord is no longer engaged, so the repeat is forwarded"
+            "the chord is no longer *engaged*, so it is not this predicate's repeat"
+        );
+        assert!(
+            matcher.swallows_while_blocked(&chord, true, &state),
+            "…but the state is blocked, and the blocked predicate does swallow it"
         );
     }
 
@@ -2656,5 +2832,189 @@ mod tests {
             !matcher.swallows_repeat(&chord, true, &state),
             "the chord never eats an unrelated key's press"
         );
+    }
+
+    // --- while blocked: the swallow promise survives a modifier-first release
+    //
+    // `Ctrl+N` engaged with swallow on, Ctrl released while N is still down:
+    // the chord is `blocked` — `step` reports nothing more — but N's press
+    // was swallowed at engagement, so its repeats and its eventual release
+    // must be swallowed too. Forwarding either leaves the focused
+    // application holding a key-down nothing ever balances; CHD-2 asks
+    // testers to release in exactly this order, and Task 9's UI copy
+    // promises the repeats stay blocked.
+
+    /// Drive `ctrl_n_chord()` into the blocked state the four tests below
+    /// share: Ctrl down, N down (engaged, swallowed), Ctrl released first.
+    fn blocked_ctrl_n() -> (ChordMatcher, ChordState) {
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // Ctrl first: the chord ends, N stays down
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        (matcher, state)
+    }
+
+    #[test]
+    fn while_blocked_the_final_keys_repeats_and_its_release_are_swallowed() {
+        let chord = ctrl_n_chord();
+        let (mut matcher, mut state) = blocked_ctrl_n();
+        assert!(!state.active && state.blocked, "the shared precondition");
+
+        for repeat in 0..3 {
+            matcher.note_key(down(0x4E, 49)); // N's auto-repeat
+            assert!(
+                matcher.swallows_while_blocked(&chord, true, &state),
+                "repeat {repeat} of the final key is consumed, not forwarded"
+            );
+            assert_eq!(
+                matcher.step(&chord, true, &mut state),
+                None,
+                "no second BindingDown — a repeat is never the Engaged edge"
+            );
+        }
+
+        matcher.note_key(up(0x4E, 49)); // N finally released
+        assert!(
+            matcher.swallows_while_blocked(&chord, true, &state),
+            "the release of the swallowed press must be swallowed too — \
+             anything else leaves an unbalanced key-down in the focused app"
+        );
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            None,
+            "the release only clears the block; the chord already ended"
+        );
+        assert!(!state.blocked, "and the block is cleared by it");
+
+        // Everything is balanced again afterwards: N is ordinary input.
+        matcher.note_key(down(0x4E, 49));
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "unblocked, N belongs to the application again"
+        );
+    }
+
+    #[test]
+    fn while_blocked_unrelated_keys_and_modifiers_stay_forwarded() {
+        let chord = ctrl_n_chord();
+        let (mut matcher, mut state) = blocked_ctrl_n();
+
+        matcher.note_key(down(0x4D, 48)); // M
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "M's press belongs to the application"
+        );
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        matcher.note_key(up(0x4D, 48)); // M released again
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "and so does its release"
+        );
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+
+        // A member-role modifier: its press was forwarded while engaged and
+        // stays forwarded while blocked (`Ctrl+C` keeps working) — only the
+        // final key ever owed a swallow.
+        matcher.note_key(down(0x11, 0)); // Ctrl pressed again, N still held
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "a modifier is never swallowed for a keyed chord"
+        );
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        matcher.note_key(up(0x11, 0));
+        assert!(
+            !matcher.swallows_while_blocked(&chord, true, &state),
+            "nor is its release"
+        );
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        assert!(
+            state.blocked,
+            "only the final key's release clears the block"
+        );
+
+        // …and that release still swallows, after all that traffic.
+        matcher.note_key(up(0x4E, 49));
+        assert!(matcher.swallows_while_blocked(&chord, true, &state));
+    }
+
+    #[test]
+    fn while_blocked_swallow_false_swallows_nothing() {
+        // The binding's own flag decides, exactly as in `step`: a chord
+        // without swallowing is ordinary input even in the blocked window.
+        let chord = ctrl_n_chord();
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_key(down(0x4E, 49));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Engaged { swallow: false })
+        );
+        matcher.note_key(up(0x11, 0));
+        assert_eq!(
+            matcher.step(&chord, false, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        assert!(state.blocked, "same blocked state, swallow off");
+
+        matcher.note_key(down(0x4E, 49)); // a repeat
+        assert!(
+            !matcher.swallows_while_blocked(&chord, false, &state),
+            "with swallowing off the repeat is forwarded"
+        );
+        matcher.note_key(up(0x4E, 49)); // the release
+        assert!(
+            !matcher.swallows_while_blocked(&chord, false, &state),
+            "and so is the release"
+        );
+        assert_eq!(matcher.step(&chord, false, &mut state), None);
+    }
+
+    #[test]
+    fn while_blocked_a_mouse_chords_final_button_release_is_swallowed() {
+        // The mouse twin: `Ctrl + Left click` engaged, Ctrl released while
+        // the button is still held blocks the chord the same way, and the
+        // button's release owes the focused application a swallow — its
+        // press was swallowed at engagement. A mouse button never
+        // auto-repeats, so only the release half matters here.
+        let chord = Chord {
+            modifiers: Modifiers {
+                ctrl: Side::Any,
+                ..Default::default()
+            },
+            key: Some(ChordKey::Mouse(MouseButton::Left)),
+        };
+        let mut matcher = ChordMatcher::default();
+        let mut state = ChordState::default();
+        matcher.note_key(down(0x11, 0));
+        matcher.note_mouse(MouseButton::Left, true);
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Engaged { swallow: true })
+        );
+        matcher.note_key(up(0x11, 0)); // Ctrl first, button still held
+        assert_eq!(
+            matcher.step(&chord, true, &mut state),
+            Some(Outcome::Released { swallow: false })
+        );
+        assert!(state.blocked, "a mouse-final chord blocks alike");
+
+        matcher.note_mouse(MouseButton::Left, false);
+        assert!(
+            matcher.swallows_while_blocked(&chord, true, &state),
+            "the button's release is consumed along with its press"
+        );
+        assert_eq!(matcher.step(&chord, true, &mut state), None);
+        assert!(!state.blocked, "cleared by the button's release");
     }
 }
