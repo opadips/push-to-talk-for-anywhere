@@ -186,7 +186,7 @@ jobs:
           if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
 
           cat > release-notes.md <<NOTES
-          **Windows only.** Download \`ptt-tool-v${VERSION}-windows-x64.exe\` (the tray app on its own) or the zip (the tray app plus the \`ptt.exe\` command-line tool). Checksums are in \`SHA256SUMS.txt\`.
+          **Windows only.** Download \`push-to-talk-for-anywhere-v${VERSION}-windows-x64.exe\` (the tray app on its own) or the zip (the tray app plus the \`ptt.exe\` command-line tool). Checksums are in \`SHA256SUMS.txt\`.
 
           To use the hotkey while a program that runs as administrator has focus, run push-to-talk-for-anywhere as administrator too.
 
