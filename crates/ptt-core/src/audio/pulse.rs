@@ -315,6 +315,16 @@ pub(crate) fn find_source<'a>(sources: &'a [SourceRow], requested: &str) -> Resu
         .ok_or_else(|| Error::DeviceNotFound(requested.to_string()))
 }
 
+/// Stamp the default marker once both answers are in: rows arrive (and
+/// their flags were computed) *before* the server-info round trip delivers
+/// the default-source name, so a source pushed while the shared cell was
+/// still `None` would otherwise never match.
+pub(crate) fn stamp_defaults(sources: &mut [SourceRow], default_source: Option<&str>) {
+    for source in sources {
+        source.is_default = default_source == Some(source.id.as_str());
+    }
+}
+
 /// One source-enumeration round trip: lists the sources and, at the same
 /// time, asks the server which one capture defaults to (both callbacks fill
 /// the same shared cell; the default comes as a one-shot server-info
@@ -346,14 +356,19 @@ fn enumerate(session: &mut Session, deadline: Instant) -> Result<Vec<SourceRow>>
     });
     session.drive(server_operation, deadline)?;
 
-    let gathered = shared.borrow();
-    if gathered.failed {
-        tracing::debug!("the PulseAudio source list ended in an error");
-        return Err(Error::Backend(
-            "listing the PulseAudio sources failed".into(),
-        ));
-    }
-    Ok(gathered.sources.clone())
+    let sources = {
+        let mut gathered = shared.borrow_mut();
+        if gathered.failed {
+            tracing::debug!("the PulseAudio source list ended in an error");
+            return Err(Error::Backend(
+                "listing the PulseAudio sources failed".into(),
+            ));
+        }
+        let default_source = gathered.default_source.take();
+        stamp_defaults(&mut gathered.sources, default_source.as_deref());
+        gathered.sources.clone()
+    };
+    Ok(sources)
 }
 
 #[derive(Debug, Default)]
@@ -422,7 +437,7 @@ fn write_mute(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_source, microphone_from_source, microphones, SourceRow};
+    use super::{find_source, microphone_from_source, microphones, stamp_defaults, SourceRow};
     use crate::audio::DEFAULT_DEVICE;
     use crate::error::Error;
 
@@ -479,6 +494,25 @@ mod tests {
         let defaults: Vec<_> = devices.iter().filter(|d| d.is_default).collect();
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].id, "bluez_input headset");
+    }
+
+    #[test]
+    fn the_default_is_stamped_after_the_server_info_lands() {
+        // The callback order for real: source rows first (while the default
+        // cell is still empty → flags all false), the default name after.
+        let mut sources = vec![
+            row("alsa_input.pci.mic", Some("Mic"), None, false),
+            row("usb.mic", Some("USB Mic"), None, false),
+        ];
+        stamp_defaults(&mut sources, Some("missing.source"));
+        assert!(
+            sources.iter().all(|s| !s.is_default),
+            "an unknown default name must not mark anything"
+        );
+        stamp_defaults(&mut sources, Some("usb.mic"));
+        let defaults: Vec<_> = sources.iter().filter(|s| s.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].id, "usb.mic");
     }
 
     #[test]
