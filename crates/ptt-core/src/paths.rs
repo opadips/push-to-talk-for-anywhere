@@ -193,12 +193,20 @@ fn env_var(name: &str) -> Option<OsString> {
 /// is set, non-empty *and absolute*, else the conventional `~`-based default
 /// passed as `default`. A relative variable is ignored — writing logs into
 /// whichever directory the process started in would be worse.
+///
+/// "Absolute" is tested through [`std::path::Path::has_root`], not
+/// [`std::path::Path::is_absolute`]: on Unix the two agree (`has_root` *is*
+/// absolute there), but on a Windows host these helpers are unit-fed POSIX
+/// paths (`/x/config`) that `is_absolute` rejects — a Windows path is only
+/// absolute with a drive prefix, which would quietly send every such test
+/// down the fallback arm. On a real Unix run such a variable always carries
+/// a POSIX path, so the helper's semantics are unchanged.
 fn unix_leaf_dir(home: &Path, xdg_variable: &Option<OsString>, default: PathBuf) -> PathBuf {
     let _ = home; // `default` is built from it by the caller
     xdg_variable
         .as_ref()
         .map(PathBuf::from)
-        .filter(|value| !value.as_os_str().is_empty() && value.is_absolute())
+        .filter(|value| !value.as_os_str().is_empty() && value.has_root())
         .unwrap_or(default)
 }
 

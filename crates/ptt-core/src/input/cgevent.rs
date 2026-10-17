@@ -52,7 +52,7 @@ pub(super) fn loop_thread(ready: Sender<Result<()>>) {
     // `rdev::grab`'s macOS callback is `FnMut(Event) -> Option<Event>`;
     // `None` consumes the event — exactly what
     // [`super::route_rdev_event`]'s answer encodes.
-    if rdev::grab(|event| super::route_rdev_event(event)).is_ok() {
+    if rdev::grab(super::route_rdev_event).is_ok() {
         tracing::info!("the input loop holds the event tap (grab active)");
         // Practically unreachable: rdev's grab returns only when tap
         // creation failed, and the preflight verified permission.

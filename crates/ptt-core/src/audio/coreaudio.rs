@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn default_device_reports_a_missing_default() {
-        let error = find_device(&vec![row(1, Some("uid"), None, false)], DEFAULT_DEVICE)
+        let error = find_device(&[row(1, Some("uid"), None, false)], DEFAULT_DEVICE)
             .expect_err("no default");
         assert!(matches!(error, Error::NoDefaultDevice));
     }
