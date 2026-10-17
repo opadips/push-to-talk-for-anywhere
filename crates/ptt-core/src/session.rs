@@ -283,6 +283,7 @@ fn worker<C: MicController, S: InputSource>(
                 original_muted,
                 dirty: true,
                 pid: std::process::id(),
+                volume: None,
             },
             &state_path,
         ),

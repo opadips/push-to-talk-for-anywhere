@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// `state.json` contents (plan §6.1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Eq` had to go when `volume` arrived — the record now can hold a float —
+/// so the tests compare field by field or through [`PartialEq`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateFile {
     /// Endpoint the record belongs to (plan §7: an id, never an index).
     pub device_id: String,
@@ -22,10 +25,17 @@ pub struct StateFile {
     pub dirty: bool,
     /// Process that wrote the record, so a kill can be recognised (§6.4).
     pub pid: u32,
+    /// The device volume the run started with, when the backend mutes by
+    /// driving the volume to zero (spec §4: only such a backend reports
+    /// one — Windows' WASAPI and PulseAudio never do). `None` in every v1
+    /// record, via the serde default, and in every record from a
+    /// mute-controlling backend.
+    #[serde(default)]
+    pub volume: Option<f32>,
 }
 
 /// What reading `state.json` produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Snapshot {
     /// No file: nothing was recorded.
     None,
@@ -47,26 +57,60 @@ impl Snapshot {
     }
 }
 
-/// `%LOCALAPPDATA%\ptt-tool\state.json` (plan §2).
+/// `%LOCALAPPDATA%\ptt-tool\state.json` (plan §2); see [`crate::paths`].
 pub fn default_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ptt-tool")
-        .join("state.json")
+    crate::paths::state_file()
 }
 
 /// Write the record **before** the microphone is touched (plan §6.1).
+///
+/// The mute-only shape every Windows caller has used since v1: the volume
+/// field stays `None` because WASAPI mutes natively and never reports a
+/// volume. See `record_with_volume` for the volume-carrying form.
 pub fn record(path: &Path, device_id: &str, original_muted: bool) -> Result<()> {
-    write_state(
+    record_state(
         path,
         &StateFile {
             device_id: device_id.to_string(),
             original_muted,
             dirty: true,
             pid: std::process::id(),
+            volume: None,
         },
     )
+}
+
+/// [`record`] plus the device volume: for backends that mute by driving the
+/// volume to zero (spec §4), so a crash can hand the original level back.
+///
+/// The volume is fetched from `controller` *here*, before anything is
+/// written, and `None` when the controller does not report one — falls back
+/// to [`record`], in other words. `original_muted` is the value the caller
+/// already read (usually via `controller.get_mute()`); it is taken rather
+/// than re-fetched because MuteUnsupported-style errors must abort the
+/// caller, not this write.
+pub fn record_with_volume(
+    path: &Path,
+    device_id: &str,
+    original_muted: bool,
+    controller: &dyn MicController,
+) -> Result<()> {
+    let volume = controller.get_volume().ok().flatten();
+    record_state(
+        path,
+        &StateFile {
+            device_id: device_id.to_string(),
+            original_muted,
+            dirty: true,
+            pid: std::process::id(),
+            volume,
+        },
+    )
+}
+
+/// Serialise a complete record — the single write every `record_*` ends in.
+fn record_state(path: &Path, state: &StateFile) -> Result<()> {
+    write_state(path, state)
 }
 
 /// Mark the run clean after the microphone has been handed back (plan §6.2).
@@ -96,7 +140,22 @@ pub fn read(path: &Path) -> Snapshot {
 
 /// Hand the microphone back exactly as recorded, then clear the dirty flag
 /// (plan §6.2). The controller must target [`StateFile::device_id`].
+///
+/// The recorded volume goes back *first* (spec §4 D6): the volume-muting
+/// backends restore the level before the mute flip, so "unmute" can never
+/// land on a still-zeroed volume. A backend that has no volume control —
+/// Windows' WASAPI, PulseAudio — answers the volume restore with
+/// [`Error::VolumeUnsupported`]; that is tolerated here rather than failing
+/// the whole restore, because the mute hand-back is the authoritative
+/// requirement and a v2 record being handed to a mute-native backend is not
+/// an error worth muting over.
 pub fn restore(ctl: &dyn MicController, state: &StateFile, path: &Path) -> Result<()> {
+    if let Some(volume) = state.volume {
+        let restored = ctl.set_volume(volume);
+        if let Err(error) = restored {
+            tracing::warn!("cannot restore the recorded volume: {error}");
+        }
+    }
     ctl.set_mute(state.original_muted)?;
     mark_clean(path)?;
     Ok(())
@@ -343,6 +402,7 @@ mod tests {
                 original_muted: true,
                 dirty: true,
                 pid: std::process::id(),
+                volume: None,
             }),
             "the mic must come back after a kill"
         );
@@ -380,6 +440,168 @@ mod tests {
 
         assert_eq!(mic.calls(), vec![false], "original state handed back");
         assert!(!read(&path).expect_found().dirty, "the run is now clean");
+    }
+
+    // --- volume seam (spec §4: volume-muting backends must be recoverable) ---
+
+    /// A fake microphone that also carries the volume seam: reports a
+    /// programmable volume and records every call in order, so a test can
+    /// assert the restore *order* as well as the values.
+    #[derive(Clone)]
+    struct VolumeMic {
+        calls: Arc<Mutex<Vec<String>>>,
+        report_volume: Option<f32>,
+        fail: bool,
+    }
+
+    impl VolumeMic {
+        fn reporting(volume: f32) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                report_volume: Some(volume),
+                fail: false,
+            }
+        }
+
+        /// Without a volume control at all — the WASAPI/PulseAudio shape.
+        fn mute_only() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                report_volume: None,
+                fail: false,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl MicController for VolumeMic {
+        fn list_capture_devices(&self) -> CoreResult<Vec<DeviceInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn get_mute(&self) -> CoreResult<bool> {
+            Ok(self.calls().last().is_some_and(|call| *call == "mute true"))
+        }
+
+        fn set_mute(&self, muted: bool) -> CoreResult<()> {
+            if self.fail {
+                return Err(crate::error::Error::DeviceUnavailable("gone".into()));
+            }
+            self.calls.lock().unwrap().push(format!("mute {muted}"));
+            Ok(())
+        }
+
+        fn get_volume(&self) -> CoreResult<Option<f32>> {
+            Ok(self.report_volume)
+        }
+
+        fn set_volume(&self, volume: f32) -> CoreResult<()> {
+            if self.report_volume.is_none() {
+                return Err(crate::error::Error::VolumeUnsupported);
+            }
+            self.calls.lock().unwrap().push(format!("volume {volume}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn record_stores_the_volume_the_controller_reports() {
+        let path = scratch("volume.json");
+        let mic = VolumeMic::reporting(0.5);
+        record_with_volume(&path, "default", false, &mic).unwrap();
+
+        let state = read(&path).expect_found();
+        assert_eq!(state.volume, Some(0.5), "the start-up volume is stored");
+        assert!(state.dirty);
+        assert!(!state.original_muted);
+    }
+
+    #[test]
+    fn record_with_a_mute_only_controller_stores_no_volume() {
+        let path = scratch("volume-none.json");
+        let mic = VolumeMic::mute_only();
+        record_with_volume(&path, "default", true, &mic).unwrap();
+
+        let state = read(&path).expect_found();
+        assert_eq!(state.volume, None, "no volume control, no volume stored");
+    }
+
+    #[test]
+    fn plain_record_keeps_the_volume_field_empty() {
+        let path = scratch("volume-plain.json");
+        record(&path, "default", true).unwrap();
+        assert_eq!(read(&path).expect_found().volume, None);
+    }
+
+    #[test]
+    fn a_v1_record_without_a_volume_field_still_reads_back() {
+        // The shape the Windows release v1.2 writes — no `volume` key.
+        let path = scratch("v1.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "device_id": "default",
+  "original_muted": true,
+  "dirty": false,
+  "pid": 4242
+}"#,
+        )
+        .unwrap();
+
+        let state = read(&path).expect_found();
+        assert_eq!(state.volume, None, "v1 records default to no volume");
+        assert_eq!(state.pid, 4242);
+    }
+
+    #[test]
+    fn restore_applies_the_volume_before_the_mute() {
+        let path = scratch("volume-restore.json");
+        let mic = VolumeMic::reporting(0.8);
+        record_with_volume(&path, "default", true, &mic).unwrap();
+        let state = read(&path).expect_found();
+
+        let mic = VolumeMic::reporting(0.8);
+        restore(&mic, &state, &path).unwrap();
+
+        // Volume first — "unmute" must not land on a still-zeroed volume —
+        // then the recorded mute state, then nothing else.
+        assert_eq!(
+            mic.calls(),
+            vec!["volume 0.8", "mute true"],
+            "volume before mute, exactly as spec §4 orders it"
+        );
+        assert!(!read(&path).expect_found().dirty);
+    }
+
+    #[test]
+    fn restore_tolerates_a_backend_without_volume_control() {
+        // A v2 record handed to a mute-native backend (or recovered by a
+        // different OS build): the mute hand-back is the authoritative
+        // requirement, the volume is best-effort.
+        let path = scratch("volume-tolerant.json");
+        record_with_volume(&path, "default", true, &VolumeMic::reporting(0.6)).unwrap();
+        let state = read(&path).expect_found();
+
+        let mic = VolumeMic::mute_only();
+        restore(&mic, &state, &path).unwrap();
+
+        assert_eq!(mic.calls(), vec!["mute true"], "the mute still lands");
+        assert!(!read(&path).expect_found().dirty, "the run is clean");
+    }
+
+    #[test]
+    fn restore_without_a_recorded_volume_skips_the_volume_step_entirely() {
+        let path = scratch("volume-absent.json");
+        record(&path, "default", false).unwrap();
+        let state = read(&path).expect_found();
+
+        let mic = VolumeMic::mute_only();
+        restore(&mic, &state, &path).unwrap();
+
+        assert_eq!(mic.calls(), vec!["mute false"]);
     }
 
     #[test]

@@ -761,13 +761,9 @@ impl Config {
     }
 }
 
-/// `%APPDATA%\ptt-tool\config.toml` (plan §2).
+/// `%APPDATA%\ptt-tool\config.toml` (plan §2); see [`crate::paths`].
 pub fn default_path() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ptt-tool")
-        .join("config.toml")
+    crate::paths::config_file()
 }
 
 #[cfg(test)]

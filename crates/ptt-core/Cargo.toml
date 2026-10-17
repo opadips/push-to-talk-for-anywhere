@@ -12,6 +12,23 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 
+# Linux: microphone mute via PulseAudio (works with PipeWire through
+# pipewire-pulse), cues via the simple API, input via rdev's evdev grab
+# (`unstable_grab` is what makes event *blocking* possible on Linux).
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.30"
+libpulse-simple-binding = "2.29"
+rdev = { version = "0.5", features = ["unstable_grab"] }
+
+# macOS: microphone mute through CoreAudio (via the objc2 project's
+# generated bindings, which cross-compile without the Apple SDK), cues
+# through rodio, input through rdev's CGEventTap.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-audio = { version = "0.3", features = ["libc"] }
+objc2-core-foundation = "0.3"
+rodio = { version = "0.23", default-features = false, features = ["wav"] }
+rdev = "0.5"
+
 # Windows-only: the `windows` crate does not build for other targets.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

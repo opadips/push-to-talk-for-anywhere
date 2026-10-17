@@ -16,6 +16,11 @@ pub enum Error {
     #[error("device does not support endpoint mute: {0}")]
     MuteUnsupported(String),
 
+    /// The device exposes no volume control, so the failsafe cannot remember
+    /// or hand back the volume a volume-muting backend used (spec §4).
+    #[error("capture device does not support volume")]
+    VolumeUnsupported,
+
     #[error("invalid mouse button {0:?} (valid: left, right, middle, x1, x2)")]
     InvalidMouseButton(String),
 
@@ -27,6 +32,13 @@ pub enum Error {
 
     #[error("file could not be written: {0}")]
     Write(String),
+
+    /// Unix-only: carries whatever PulseAudio / CoreAudio / rdev / X11 said.
+    /// There is no common error type across those stacks, so a message is
+    /// what every one of them can produce (`Error::Windows`'s twin).
+    #[cfg(unix)]
+    #[error("audio or input backend error: {0}")]
+    Backend(String),
 
     /// Windows-only: carries the `HRESULT`/message from windows-rs.
     #[cfg(windows)]
@@ -81,5 +93,26 @@ mod tests {
         let err = Error::MuteUnsupported("USB Mic".into());
         assert!(err.to_string().contains("USB Mic"));
         assert!(err.to_string().contains("mute"));
+    }
+
+    #[test]
+    fn volume_unsupported_message_says_what_is_missing() {
+        let err = Error::VolumeUnsupported;
+        assert!(err.to_string().contains("volume"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_message_carries_the_stack_report() {
+        let err = Error::Backend("PulseAudio: connection refused".into());
+        let message = err.to_string();
+        assert!(
+            message.contains("audio or input backend error"),
+            "{message}"
+        );
+        assert!(
+            message.contains("PulseAudio: connection refused"),
+            "{message}"
+        );
     }
 }

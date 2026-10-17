@@ -9,6 +9,12 @@ use crate::error::{Error, Result};
 #[cfg(windows)]
 pub mod wasapi;
 
+#[cfg(target_os = "linux")]
+pub mod pulse;
+
+#[cfg(target_os = "macos")]
+pub mod coreaudio;
+
 /// A capture endpoint as the rest of the app sees it.
 ///
 /// `id` is the endpoint ID string (`IMMDevice::GetId`), never a list index —
@@ -21,10 +27,33 @@ pub struct DeviceInfo {
 }
 
 /// The microphone operations the app needs (plan §4).
+///
+/// The `get_volume`/`set_volume` pair exists solely for the failsafe
+/// ([`crate::failsafe`]): backends that mute by driving the *volume* to zero
+/// (some CoreAudio devices have no mute control, spec §4) report their volume
+/// here so a crash can hand the user's original level back, not just "muted".
+/// Backends that support mute natively (WASAPI, PulseAudio) inherit the
+/// default `None`/unsupported behaviour and never touch it.
 pub trait MicController: Send {
     fn list_capture_devices(&self) -> Result<Vec<DeviceInfo>>;
     fn get_mute(&self) -> Result<bool>;
     fn set_mute(&self, muted: bool) -> Result<()>;
+
+    /// The device's volume as 0.0–1.0, when there is a volume control at all
+    /// — `Ok(None)` means "this backend never mutes by volume", which is what
+    /// every default implementation says.
+    #[allow(unused_variables)]
+    fn get_volume(&self) -> Result<Option<f32>> {
+        Ok(None)
+    }
+
+    /// Set the device's volume (0.0–1.0). Only a volume-muting backend can
+    /// answer this meaningfully; the default refuses with
+    /// [`Error::VolumeUnsupported`].
+    #[allow(unused_variables)]
+    fn set_volume(&self, volume: f32) -> Result<()> {
+        Err(Error::VolumeUnsupported)
+    }
 }
 
 /// Device id that means "follow the system default endpoint" (plan §7).

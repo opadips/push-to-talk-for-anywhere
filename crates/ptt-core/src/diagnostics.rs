@@ -321,7 +321,7 @@ pub fn maybe_stall_warning(device: &str, wait_ms: u32, exec_ms: u64) -> Option<S
 
 /// Durable copy of every watchdog finding: `%LOCALAPPDATA%\ptt-tool\logs\`
 /// `findings.log` (same directory the rotating `ptt.log` lives in, reached
-/// the way [`crate::failsafe`] reaches `state.json`).
+/// the way [`crate::failsafe`] reaches `state.json`) — see [`crate::paths`].
 ///
 /// Why this file exists: the `tracing` appender is non-blocking and the
 /// `WorkerGuard` is never dropped on a hard kill, so a wedged process (or an
@@ -330,12 +330,7 @@ pub fn maybe_stall_warning(device: &str, wait_ms: u32, exec_ms: u64) -> Option<S
 /// watchdog thread, which never touches the input pipeline, so the record
 /// survives the process it describes.
 pub fn findings_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ptt-tool")
-        .join("logs")
-        .join("findings.log")
+    crate::paths::findings_file()
 }
 
 /// Append one finding line to [`findings_path`] and flush it to disk before

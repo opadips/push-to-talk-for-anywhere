@@ -7,6 +7,9 @@
 #[cfg(windows)]
 pub mod hook;
 
+#[cfg(unix)]
+pub mod common;
+
 pub mod chord;
 
 use crate::error::{Error, Result};
