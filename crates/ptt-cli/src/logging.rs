@@ -35,7 +35,19 @@ mod tests {
 
     #[test]
     fn the_log_directory_lives_under_ptt_tool() {
-        assert!(log_dir().ends_with(std::path::Path::new("ptt-tool").join("logs")));
+        let log = log_dir();
+        // Per-platform expected leaf: Windows/Linux have `ptt-tool/logs`,
+        // macOS uses `~/Library/Logs/ptt-tool/` (no `logs` leaf).
+        #[cfg(target_os = "macos")]
+        let expected = std::path::Path::new("ptt-tool").to_path_buf();
+        #[cfg(not(target_os = "macos"))]
+        let expected = std::path::Path::new("ptt-tool").join("logs");
+        assert!(
+            log.ends_with(&expected),
+            "log dir {} does not end with {}",
+            log.display(),
+            expected.display()
+        );
     }
 
     #[test]
