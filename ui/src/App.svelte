@@ -1,7 +1,7 @@
 <script lang="ts">
   // The settings window (plan §9 M4): what the plan lists as bind
   // key/button ("press any key"), device, release delay, swallow, sounds,
-  // start-with-Windows, on-exit — plus the live state and any error the
+  // start-at-login, on-exit — plus the live state and any error the
   // engine reports. Everything is applied by Save; Enable/Disable acts
   // immediately, like the tray menu.
   import { onDestroy, onMount } from "svelte";
@@ -842,7 +842,7 @@
           <span class="num">05</span> // General
         </h2>
         <label class="switch-row">
-          <span>Start with Windows</span>
+          <span>Start automatically at login</span>
           <input type="checkbox" class="switch" bind:checked={form.app.start_with_windows} />
         </label>
         <label class="switch-row">

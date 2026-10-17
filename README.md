@@ -1,10 +1,10 @@
 <h1 align="center">Push-to-Talk for Anywhere</h1>
 
-<p align="center"><b>Hold a key to unmute your mic in any Windows app.</b><br>
+<p align="center"><b>Hold a key to unmute your mic in any app.</b><br>
 Browser meetings, games, OBS: no built-in push-to-talk needed.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white" alt="Windows 10/11">
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20%7C%20Linux%20(X11)%20%7C%20macOS-blue" alt="Windows 10/11, Linux (X11), macOS">
   <img src="https://img.shields.io/github/license/opadips/push-to-talk-for-anywhere" alt="MIT license">
   <a href="https://github.com/opadips/push-to-talk-for-anywhere/releases"><img src="https://img.shields.io/github/downloads/opadips/push-to-talk-for-anywhere/total" alt="Downloads"></a>
 </p>
@@ -14,7 +14,7 @@ Browser meetings, games, OBS: no built-in push-to-talk needed.</p>
   <img src="https://img.shields.io/badge/App%20shell-Tauri-24C8D8?logo=tauri&logoColor=white" alt="App shell: Tauri">
 </p>
 
-<p align="center"><a href="https://github.com/opadips/push-to-talk-for-anywhere/releases/latest"><b>⬇ Download for Windows</b></a></p>
+<p align="center"><a href="https://github.com/opadips/push-to-talk-for-anywhere/releases/latest"><b>⬇ Download</b></a></p>
 
 <p align="center"><img src="demo/push-to-talk-demo.gif" width="800" alt="Hold a key and the mic unmutes; let go and it mutes again"></p>
 
@@ -34,7 +34,8 @@ stream — the mic opens when you press and closes when you let go.
 - **Doesn't clip your words.** A short release delay keeps the last syllable
   from getting cut off (default 200 ms, adjustable).
 - **Your key, your call.** Any keyboard key or mouse button, including side
-  buttons, a single modifier like Left Alt, or a whole combination such as
+  buttons (Linux: Left/Middle/Right only), a single modifier like Left Alt, or
+  a whole combination such as
   Ctrl+Shift or Right Ctrl+N. Optionally swallow it so it never reaches other
   apps.
 - **Press once to talk.** An optional toggle key in settings latches the mic
@@ -65,10 +66,15 @@ Download `push-to-talk-for-anywhere-vX.Y.Z-windows-x64.zip` (or the plain `.exe`
 program) from the [Releases](https://github.com/opadips/push-to-talk-for-anywhere/releases)
 page. Unzip, run `push-to-talk-for-anywhere.exe`. That's it.
 
+On Linux grab `push-to-talk-for-anywhere-vX.Y.Z-linux-x64.tar.gz`, on macOS
+`push-to-talk-for-anywhere-vX.Y.Z-macos-arm64.zip` — both unpack to the
+`push-to-talk-for-anywhere` tray app plus the `ptt` command-line tool, same
+deal as the zip.
+
 There's a `SHA256SUMS.txt` next to the files if you want to check them.
 
 If the window you're talking into runs with **higher privileges** (an elevated /
-administrator app), run `push-to-talk-for-anywhere.exe` as administrator too — otherwise Windows
+administrator app — a Windows situation), run `push-to-talk-for-anywhere.exe` as administrator too — otherwise Windows
 blocks the hotkey and it won't respond while that window has focus.
 
 Heads up: the app installs a global keyboard hook, which some antivirus tools
@@ -113,14 +119,14 @@ In settings:
   position (top or bottom, left, center or right) and distance from the edge.
   It sits above the taskbar, follows the primary monitor's scaling, and clicks
   always pass through it.
-- **General** — start with Windows, start hidden in the tray.
+- **General** — start automatically at login, start hidden in the tray.
 
-Only one hold-to-talk session at a time. If `ptt.exe ptt` is already running,
-the tray app says so instead of fighting it.
+Only one hold-to-talk session at a time. If `ptt ptt` (the CLI) is already
+running, the tray app says so instead of fighting it.
 
 ## Command line (optional)
 
-There's a `ptt.exe` if you prefer a terminal. Not required for normal use.
+There's a `ptt` command if you prefer a terminal (`ptt.exe` on Windows). Not required for normal use.
 
 ```text
 ptt devices                       list mics
@@ -135,13 +141,45 @@ ptt ptt --release-delay 0 --no-swallow --device <id>
 
 Enter or Ctrl+C quits a session and restores the mute state it found at start-up.
 
+## Platform differences
+
+Everything above works the same on Windows 10/11, Linux (X11 sessions) and
+macOS (Apple Silicon and Intel). A few things differ per platform:
+
+- **Input and permissions.** Linux needs an X11 session — on Wayland there is
+  no global input hook, and the app refuses politely with the error
+  *"no X display on this Wayland session (DISPLAY unset): global push-to-talk
+  needs X11 or an X11 desktop — Wayland is not supported yet"* in the settings
+  error banner. macOS asks for **Accessibility** permission the first time
+  (System Settings → Privacy & Security → Accessibility) — without it the app
+  cannot see key presses. If key *blocking* (swallow) is not available,
+  Linux/macOS fall back to listening and warn once.
+- **Bindables.** On Linux, mouse buttons X1/X2 (side buttons) cannot be bound —
+  only Left/Middle/Right reach the backend. Left, Right and Middle work the
+  same everywhere.
+- **Autostart at login.** Windows writes a registry run key
+  (`HKCU\...\CurrentVersion\Run`), Linux installs a desktop entry in
+  `~/.config/autostart`, macOS builds a LaunchAgent. Same setting, per-OS
+  mechanism.
+- **Tray click.** Windows and macOS: left click opens settings, right click
+  opens the menu. Linux desktops open the menu on left click too — right
+  click does the same.
+- **Audio.** Windows and macOS mute your mic device directly (CoreAudio on
+  macOS; if macOS refuses a mute, it records the volume and restores that).
+  Linux uses PulseAudio/PipeWire source mute, so "default" follows whatever
+  source the desktop points at.
+- Files it keeps (next section) live in the usual per-OS places.
+
 ## Files it keeps
 
-| What | Where |
-|---|---|
-| Config | `%APPDATA%\ptt-tool\config.toml` |
-| Log | `%LOCALAPPDATA%\ptt-tool\logs\ptt.log` |
-| Recovery state | `%LOCALAPPDATA%\ptt-tool\state.json` |
+| What | Windows | Linux | macOS |
+|---|---|---|---|
+| Config | `%APPDATA%\ptt-tool\config.toml` | `~/.config/ptt-tool/config.toml` | `~/Library/Application Support/ptt-tool/config.toml` |
+| Log | `%LOCALAPPDATA%\ptt-tool\logs\ptt.log` | `~/.local/state/ptt-tool/logs/ptt.log` | `~/Library/Logs/ptt-tool/ptt.log` |
+| Recovery state | `%LOCALAPPDATA%\ptt-tool\state.json` | `~/.local/state/ptt-tool/state.json` | `~/Library/Application Support/ptt-tool/state.json` |
+
+(`~/.config` and `~/.local/state` respect `XDG_CONFIG_HOME` /
+`XDG_STATE_HOME` when set.)
 
 A corrupt config falls back to defaults and gets renamed `config.toml.bad`
 rather than taking the app down with it.
@@ -157,7 +195,9 @@ cargo build --release
 ```
 
 `ui/dist` is generated, so build the frontend before Cargo — the settings window
-lives in there. Output: `target\release\ptt-tool.exe` and `ptt.exe`.
+lives in there. Output: `target\release\ptt-tool.exe` and `ptt.exe` (on Linux
+and macOS the same two land in `target/release` as `ptt-tool` and `ptt`;
+Linux and macOS are supported system targets, nothing to configure).
 
 Before pushing, the usual:
 

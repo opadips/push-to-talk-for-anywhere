@@ -9,7 +9,7 @@ body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  /* Belt and braces: the window is click-through at the Win32 level. */
+  /* Belt and braces: the window is click-through at the native window level. */
   pointer-events: none;
   user-select: none;
 }

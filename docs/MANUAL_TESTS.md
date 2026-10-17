@@ -1,7 +1,29 @@
-# Manual tests (Windows)
+# Manual tests (Windows, Linux & macOS)
 
-Run on a clean Windows 10/11 machine before every release. Tick nothing that
-you did not actually observe.
+Run on a clean machine before every release. Tick nothing that you did not
+actually observe. Windows 10/11 checks are the main body below; the
+[Linux & macOS](#linux--macos) section covers what to observe there.
+
+## Per-OS overlay notes
+
+- **Linux input** needs an **X11 session** (the app, CLI included). On Wayland
+  nothing is captured: the backend refuses politely and the settings window
+  shows the error *"no X display on this Wayland session (DISPLAY unset):
+  global push-to-talk needs X11 or an X11 desktop — Wayland is not supported
+  yet"*. Test under XWayland where a desktop forces it.
+- **macOS input** needs the **Accessibility** permission (System Settings →
+  Privacy & Security → Accessibility); without it the app errors instead of
+  capturing keys. Record what it looks like on first launch of each binary.
+- **Per-OS paths** (same roles, different homes):
+
+  | What | Windows | Linux | macOS |
+  |---|---|---|---|
+  | Config | `%APPDATA%\ptt-tool\config.toml` | `~/.config/ptt-tool/config.toml` | `~/Library/Application Support/ptt-tool/config.toml` |
+  | Log | `%LOCALAPPDATA%\ptt-tool\logs\ptt.log` | `~/.local/state/ptt-tool/logs/ptt.log` | `~/Library/Logs/ptt-tool/ptt.log` |
+  | Recovery state | `%LOCALAPPDATA%\ptt-tool\state.json` | `~/.local/state/ptt-tool/state.json` | `~/Library/Application Support/ptt-tool/state.json` |
+
+  (Linux honours `XDG_CONFIG_HOME` / `XDG_STATE_HOME`.) Read the paths below
+  for the OS you are testing.
 
 ## Environment
 
@@ -12,7 +34,7 @@ you did not actually observe.
 
 ## Running the checks
 
-Two ways to drive it: `ptt.exe` in a terminal for the low-level checks, and
+Two ways to drive it: `ptt` in a terminal for the low-level checks, and
 the `ptt-tool` tray app (M4) for the product itself. On Windows, build both
 (`ui/dist` is generated, so the settings window must exist before Cargo runs):
 
@@ -23,9 +45,9 @@ cargo build --release           # target\release\ptt.exe and ptt-tool.exe
 ```
 
 ```text
-target\release\ptt-tool.exe            # the tray app (M4)
+target\release\ptt-tool.exe            # the tray app (M4) — Linux/macOS: target/release/ptt-tool
 
-ptt.exe devices                         # list mics (M1)
+ptt.exe devices                         # list mics (M1) — Linux/macOS: ptt (the same four steps below)
 ptt.exe status                          # 'muted' / 'unmuted' (M1)
 ptt.exe mute            /  ptt.exe unmute
 
@@ -54,6 +76,11 @@ The session also prints the two files it owns (M3):
 - config: `%APPDATA%\ptt-tool\config.toml`
 - log: `%LOCALAPPDATA%\ptt-tool\logs\ptt.log`
 
+(On Linux these live under `~/.config/` and `~/.local/state/` (or
+`XDG_CONFIG_HOME` / `XDG_STATE_HOME`); on macOS under
+`~/Library/Application Support/ptt-tool/` and `~/Library/Logs/ptt-tool/` —
+see the per-OS path table above.)
+
 Start/stop sound cues do not exist until M5, so the sound parts of the
 checklist cannot be observed yet.
 
@@ -79,7 +106,10 @@ checklist cannot be observed yet.
 
 ### Fail-safe (M3) — critical
 - [ ] Task Manager kill while talking, then relaunch: mic restored to original state.
+      (Linux: SIGKILL via `kill -9` from a terminal; macOS: `kill -9` from
+      Activity Monitor or a terminal.)
 - [ ] Quit with Enter **and** with Ctrl+C: mic restored to original state.
+      (Linux accepts Ctrl+C / SIGTERM; macOS the same.)
 - [ ] Panic (forced): mic restored.
 - [ ] Corrupt `config.toml`: falls back to defaults, logs, no crash, and the
       broken file is kept as `config.toml.bad`.
@@ -88,9 +118,11 @@ checklist cannot be observed yet.
 - [ ] Flags persist: run `ptt.exe ptt --release-delay 500`, quit, then run
       `ptt.exe ptt` plain — the log line reports a 500 ms release delay.
 - [ ] Log file exists at `%LOCALAPPDATA%\ptt-tool\logs\ptt.log` and records
-      the session start.
+      the session start. (Linux: `~/.local/state/ptt-tool/logs/ptt.log`;
+      macOS: `~/Library/Logs/ptt-tool/ptt.log`.)
 - [ ] `state.json` in `%LOCALAPPDATA%\ptt-tool\` ends every test with
-      `"dirty": false`.
+      `"dirty": false`. (Linux: `~/.local/state/ptt-tool/`; macOS:
+      `~/Library/Application Support/ptt-tool/`.)
 
 ### Sleep / lock (M2-M3)
 - [ ] Sleep + resume: hotkey still works.
@@ -151,8 +183,14 @@ Launch `target\release\ptt-tool.exe` (start with no `ptt.exe` session running).
       is louder/quieter; 0% is silent. Untick "Play the talk / release
       sounds" + Save — no cue plays. The sounds come out of the default
       playback device and do not affect the app's mic muting.
-- [ ] Start with Windows adds/removes `ptt-tool` under
+- [ ] Start automatically at login (Windows) adds/removes `ptt-tool` under
       `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+      (Linux: it installs/removes a desktop entry under
+      `~/.config/autostart/`; macOS: a LaunchAgent under
+      `~/Library/LaunchAgents/`. Verify with the checkbox in Settings →
+      General plus a logout/login. The setting is the same
+      "Start automatically at login" toggle everywhere; only the mechanism
+      is per-OS.)
 - [ ] `start_hidden = true` → relaunch shows **no window**, only the tray icon.
 - [ ] On-exit choice (hand the microphone back / leave it unmuted) persists
       and is honoured on Quit.
@@ -310,6 +348,11 @@ assume `Ctrl+N` is bound and Saved.
 
 ### Input-stall diagnostics — DIAG-1…DIAG-7
 
+(Windows-specific: these dig into the Windows low-level hook timeout and
+Windows Event Viewer. On Linux/macOS there are no `WM_TIMER` timeouts or
+`LowLevelHooksTimeout`; simply record any WARN lines and both logs if input
+ever stalls.)
+
 - [ ] **DIAG-1 Startup line** — after launch the log (%LOCALAPPDATA%\ptt-tool\logs\ptt.log) contains "Windows LowLevelHooksTimeout = …" (a value or "not set").
 - [ ] **DIAG-2 Quiet in normal use** — ordinary typing/mouse use (non-gaming) produces no new WARN lines; if any appear, they are findings — send the log lines verbatim.
 - [ ] **DIAG-3 Incident capture** — if input stalls again: note the exact time, keep the app running, then send the log tail (WARN lines) and check Windows Event Viewer → Windows Logs → Application for "Application Error" (Event 1000) around that time.
@@ -320,6 +363,48 @@ assume `Ctrl+N` is bound and Saved.
 
 ## Known limitations (confirm and record, plan §7)
 
-- [ ] Elevated (admin) window focused: hotkey does **not** fire (UIPI) — as documented.
+- [ ] Elevated (admin) window focused: hotkey does **not** fire (UIPI)
+      (Windows-only; there is no UIPI equivalent on Linux or macOS — the
+      rdev listeners see all windows; record any gaps you spot).
 - [ ] Bound key / games with anti-cheat: record results per game.
 - [ ] Drivers/apps that reset mute on their own: record which.
+
+## Linux & macOS
+
+Run these after (or instead of) the Windows checklist on the target OS.
+`ptt` works the same way there: a session prints its binding, mutes the mic,
+and unmutes while the bound input is held; Enter or Ctrl+C (also SIGTERM)
+quits and restores the mute state it found.
+
+- [ ] **X11 session only** — start the app (and CLI) in an X11 desktop: the
+      hook works. Start it in a pure Wayland session: it refuses politely
+      with the wayland error in the overlay note above instead of capturing
+      nothing silently.
+- [ ] **macOS Accessibility prompt** — first launch shows the permission
+      error (in the settings window and the terminal); granting the
+      Accessibility permission makes keys arrive without a reboot.
+- [ ] **Mic device picker** — the Microphone card lists the mics of the OS
+      (PulseAudio/PipeWire sources on Linux, CoreAudio input devices on
+      macOS) and picking one or "System default" really mutes that device.
+- [ ] **Autostart** — "Start automatically at login" installs/removes a
+      desktop entry under `~/.config/autostart/` on Linux and a LaunchAgent
+      under `~/Library/LaunchAgents/` on macOS. Tick it, log out and back in:
+      one tray app, starting muted, appears.
+- [ ] **Tray menu behaviour** — Linux: left click and right click both open
+      the tray menu; pick "Open settings" from it. Windows/macOS keep
+      left-click-opens-settings with the menu on right click.
+- [ ] **Sound cues** — the start/stop cues reach the default sink (Linux:
+      PulseAudio/PipeWire — `pactl info` confirms; macOS: CoreAudio) and the
+      Sounds volume slider makes them audibly quieter/louder; 0% is silent.
+      Volumes should roughly match the Windows ones at the same slider value.
+- [ ] **Overlay above dock/panel** — with the overlay on, the badge draws
+      above a Cairo/GNOME dock or the macOS dock, is never clipped by the
+      panel, keeps accepting clicks underneath (M-3), and turns off/on
+      immediately on Save (M-6).
+- [ ] **Linux binary brings its own libraries** — the tar.gz unpacked on a
+      stock Ubuntu 22.04 userland runs without glibc/ABI errors (the release
+      runner is ubuntu-22.04; other distros usually fine but not promised).
+- [ ] **Single instance on Linux/macOS** — with one `ptt ptt` session
+      running, the second CLI (or the tray app) reports `already running`.
+      The lock is `$XDG_RUNTIME_DIR/ptt-tool.lock` (fallback `/tmp`); the
+      GUI's own single-instance check focuses the first window.

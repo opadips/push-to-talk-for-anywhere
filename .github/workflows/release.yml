@@ -1,9 +1,9 @@
 name: Release
 
 # Manual release: run it from the Actions tab ("Run workflow") on the default
-# branch. It works out the next version, checks and builds the app, commits
-# the version bump, creates the vX.Y.Z tag and publishes a GitHub release with
-# the built files attached.
+# branch. It works out the next version, runs the CI gates and builds the app
+# on Windows, Linux and macOS, commits the version bump, creates the vX.Y.Z
+# tag and publishes a GitHub release with the built files attached.
 #
 # The version is kept in the workspace Cargo.toml (the app, the CLI and the
 # window title all read it from there). With no vX.Y.Z tag yet, the first
@@ -35,7 +35,7 @@ on:
         type: boolean
         default: false
 
-# The job pushes a commit and a tag and creates the release.
+# The publish job pushes a commit and a tag and creates the release.
 permissions:
   contents: write
 
@@ -48,9 +48,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: build and publish
-    runs-on: windows-latest
+  build:
+    name: ${{ matrix.os }} — gates + release build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            id: windows
+          - os: ubuntu-22.04
+            id: linux
+          - os: macos-latest
+            id: macos
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Only release from the default branch
         shell: bash
@@ -67,6 +77,16 @@ jobs:
         with:
           fetch-depth: 0 # the tags are needed to find the latest version
 
+      # Linux needs the usual Tauri/dev packages before it can build the
+      # workspace; the other runners need nothing extra.
+      - name: Install Linux system packages
+        if: matrix.id == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libpulse-dev \
+            xorg-dev librsvg2-dev build-essential curl wget file libxdo-dev \
+            libssl-dev
+
       - name: Work out the version
         id: version
         shell: bash
@@ -79,17 +99,17 @@ jobs:
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Releasing v$version" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
       - name: Set the version in Cargo.toml and Cargo.lock
         shell: bash
         run: |
           scripts/release-version.sh apply "${{ steps.version.outputs.version }}"
           # Only the workspace members change; no other dependency moves.
           cargo update --workspace
-
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -110,7 +130,7 @@ jobs:
         working-directory: ui
         run: npm run build
 
-      # The same gate as CI: nothing is released that would not pass it.
+      # The same gates as CI: nothing is released that would not pass them.
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -120,26 +140,116 @@ jobs:
       - name: Test
         run: cargo test
 
-      - name: Build (release)
+      - name: Build (release, locked to Cargo.lock)
         run: cargo build --release --locked
 
       - name: Package
-        id: package
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          name="push-to-talk-for-anywhere-v${VERSION}-windows-x64"
-          mkdir -p "dist/$name"
-          cp target/release/ptt.exe README.md "dist/$name/"
-          # The cargo binary stays ptt-tool.exe; everything shipped is named push-to-talk-for-anywhere.
-          cp target/release/ptt-tool.exe "dist/$name/push-to-talk-for-anywhere.exe"
-          # The tray app is one self-contained file; offer it on its own too.
-          cp target/release/ptt-tool.exe "dist/${name}.exe"
-          powershell -NoProfile -Command "Compress-Archive -Path 'dist/$name/*' -DestinationPath 'dist/$name.zip'"
-          rm -rf "dist/$name"
-          (cd dist && sha256sum "$name.zip" "$name.exe" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          case "$RUNNER_OS" in
+            Windows)
+              name="push-to-talk-for-anywhere-v${VERSION}-windows-x64"
+              mkdir -p "dist/$name"
+              cp target/release/ptt.exe README.md "dist/$name/"
+              # The cargo binary stays ptt-tool.exe; everything shipped is named push-to-talk-for-anywhere.
+              cp target/release/ptt-tool.exe "dist/$name/push-to-talk-for-anywhere.exe"
+              # The tray app is one self-contained file; offer it on its own too.
+              cp target/release/ptt-tool.exe "dist/${name}.exe"
+              powershell -NoProfile -Command "Compress-Archive -Path 'dist/$name/*' -DestinationPath 'dist/$name.zip'"
+              rm -rf "dist/$name"
+              ;;
+            Linux)
+              name="push-to-talk-for-anywhere-v${VERSION}-linux-x64"
+              mkdir -p "dist/$name"
+              cp target/release/ptt README.md "dist/$name/"
+              cp target/release/ptt-tool "dist/$name/push-to-talk-for-anywhere"
+              tar -czf "dist/$name.tar.gz" -C "dist/$name" .
+              rm -rf "dist/$name"
+              ;;
+            Darwin)
+              name="push-to-talk-for-anywhere-v${VERSION}-macos-arm64"
+              mkdir -p "dist/$name"
+              cp target/release/ptt README.md "dist/$name/"
+              cp target/release/ptt-tool "dist/$name/push-to-talk-for-anywhere"
+              (cd "dist/$name" && zip -q -r "../$name.zip" .)
+              rm -rf "dist/$name"
+              ;;
+            *)
+              echo "::error::Unknown runner OS: $RUNNER_OS"
+              exit 1
+              ;;
+          esac
           ls -la dist
+
+      # The publish job collects these and reuses the lock it just built.
+      - name: Upload the build files
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.id }}
+          path: dist/*
+          retention-days: 3
+
+      # One job owns the manifest that gets committed; the Linux one runs the
+      # update that ends up in the repository.
+      - name: Upload the manifest for committing
+        if: matrix.id == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-manifest
+          path: |
+            Cargo.toml
+            Cargo.lock
+          retention-days: 3
+
+  publish:
+    name: publish — commit, tag and release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags are needed to find the latest version
+
+      - name: Work out the version again
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          version="$(scripts/release-version.sh next "$BUMP" "$EXPLICIT")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Collect the built files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check the files belong to this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ls -la dist
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              "push-to-talk-for-anywhere-v${VERSION}-"*) ;;
+              *) echo "::error::unexpected release file '$f'"; exit 1 ;;
+            esac
+          done
+
+      # One checksum file across every platform's package.
+      - name: Build SHA256SUMS.txt
+        run: |
+          cd dist
+          for f in *; do
+            [ "$f" = "SHA256SUMS.txt" ] && continue
+            sha256sum "$f"
+          done | tee SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       # --- dry run: keep the files, change nothing ----------------------------
       - name: Keep the build (dry run)
@@ -154,9 +264,14 @@ jobs:
       # The commit goes first and the tag is created by the release itself, so a
       # failure in between leaves no half-made tag: running the workflow again
       # finds the same version, sees Cargo.toml already has it and carries on.
+      - name: Restore the manifest to commit
+        uses: actions/download-artifact@v4
+        with:
+          name: cargo-manifest
+          path: .
+
       - name: Commit the version bump
         if: ${{ !inputs.dry_run }}
-        shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
           BRANCH: ${{ github.ref_name }}
@@ -173,7 +288,6 @@ jobs:
 
       - name: Create the tag and the release
         if: ${{ !inputs.dry_run }}
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -186,9 +300,15 @@ jobs:
           if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
 
           cat > release-notes.md <<NOTES
-          **Windows only.** Download \`push-to-talk-for-anywhere-v${VERSION}-windows-x64.exe\` (the tray app on its own) or the zip (the tray app plus the \`ptt.exe\` command-line tool). Checksums are in \`SHA256SUMS.txt\`.
+          Downloads:
 
-          To use the hotkey while a program that runs as administrator has focus, run push-to-talk-for-anywhere as administrator too.
+          - **Windows 10/11** — \`push-to-talk-for-anywhere-v${VERSION}-windows-x64.zip\` or the bare \`…-windows-x64.exe\` (the tray app on its own)
+          - **Linux (X11, amd64)** — \`push-to-talk-for-anywhere-v${VERSION}-linux-x64.tar.gz\` (the tray app and the \`ptt\` tool). Needs an X11 or XWayland session; Wayland is not supported yet.
+          - **macOS (Apple Silicon)** — \`push-to-talk-for-anywhere-v${VERSION}-macos-arm64.zip\` (the tray app and the \`ptt\` tool). Grant the Accessibility permission on first launch.
+
+          Each zip/tar.gz contains the \`push-to-talk-for-anywhere\` tray app plus the \`ptt\` command-line tool and the README. Checksums are in \`SHA256SUMS.txt\`.
+
+          Windows: to use the hotkey while a program that runs as administrator has focus, run push-to-talk-for-anywhere as administrator too.
 
           ---
           NOTES

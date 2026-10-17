@@ -69,10 +69,20 @@ next() {
 }
 
 apply() {
-  local version="${1:-}"
+  local version="${1:-}" tmp
   [[ "$version" =~ $SEMVER ]] || fail "'$version' is not a valid version"
   # Only the first `version = "…"` line: the one under [workspace.package].
-  sed -i "0,/^version = \".*\"/s//version = \"${version}\"/" Cargo.toml
+  # awk + mv instead of `sed -i`, which GNU knows a way to stop after the
+  # first match ("0,/re/") but BSD sed does not.
+  tmp="$(mktemp)" || fail "could not create a temp file"
+  awk -v v="$version" '
+    !done && /^version = "/ {
+      sub(/^version = ".*"/, "version = \"" v "\"")
+      done = 1
+    }
+    { print }
+  ' Cargo.toml > "$tmp"
+  mv "$tmp" Cargo.toml
   [[ "$(cargo_version)" == "$version" ]] || fail "could not set the version in Cargo.toml"
 }
 
