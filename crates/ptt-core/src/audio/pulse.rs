@@ -268,10 +268,7 @@ pub(crate) struct SourceRow {
 /// The source list as the app sees it: only physically real microphones
 /// with a default flag attached where the server says so.
 pub(crate) fn microphones(sources: &[SourceRow]) -> Vec<DeviceInfo> {
-    sources
-        .iter()
-        .filter_map(microphone_from_source)
-        .collect()
+    sources.iter().filter_map(microphone_from_source).collect()
 }
 
 /// Which sources count as microphones (`None` when one does not).

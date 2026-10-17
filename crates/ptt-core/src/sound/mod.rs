@@ -8,11 +8,21 @@
 //!
 //! Like the microphone and the input hooks, playback sits behind a trait so
 //! the engine can be tested with a fake ([`SoundPlayer`]); the Windows
-//! implementation lives in [`winmm`]. Everything that is not a Windows call —
-//! reading the WAV and applying the volume — is plain code, tested here.
+//! implementation lives in [`winmm`] on Windows, [`pulse`] on Linux and
+//! [`rodio`] on macOS. Everything that is not an audio call — reading the WAV
+//! and applying the volume — is plain code, tested here.
 
 #[cfg(windows)]
 pub mod winmm;
+
+/// Playback of the cues on Linux (PulseAudio, so PipeWire through
+/// `pipewire-pulse` counts too).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub mod pulse;
+
+/// Playback of the cues on macOS (rodio over CoreAudio).
+#[cfg(target_os = "macos")]
+pub mod rodio;
 
 /// Which of the two cues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

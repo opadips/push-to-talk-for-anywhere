@@ -26,8 +26,14 @@ rdev = { version = "0.5", features = ["unstable_grab"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-audio = { version = "0.3", features = ["libc"] }
 objc2-core-foundation = "0.3"
-rodio = { version = "0.23", default-features = false, features = ["wav"] }
-rdev = "0.5"
+# AXIsProcessTrusted — is the tap installable before we try it?
+objc2-application-services = "0.3"
+# "playback" turns on the device-sink side (the mixer + play + Player that
+# the cues need); "wav" is the decoder for the embedded 16-bit cues.
+rodio = { version = "0.23", default-features = false, features = ["wav", "playback"] }
+# `unstable_grab` enables rdev's CGEventTap event *blocking* (used before the
+# `listen` fallback on macOS as well, when the tap can be installed).
+rdev = { version = "0.5", features = ["unstable_grab"] }
 
 # Windows-only: the `windows` crate does not build for other targets.
 [target.'cfg(windows)'.dependencies]

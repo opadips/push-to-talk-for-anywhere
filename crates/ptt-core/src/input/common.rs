@@ -881,8 +881,8 @@ pub(super) fn warn_blocking_unavailable(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        rdev_key_report, rdev_mouse_button, route_key, route_rdev_event, set_blocking,
-        shared, KeyReport,
+        rdev_key_report, rdev_mouse_button, route_key, route_rdev_event, set_blocking, shared,
+        KeyReport,
     };
     use super::{Binding, InputEvent, MouseButton};
     use crate::input::chord::modifier_slot;
