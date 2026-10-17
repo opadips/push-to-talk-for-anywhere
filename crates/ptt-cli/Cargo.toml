@@ -24,3 +24,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_System_Threading",
 ] }
+
+# Unix: the single-instance `flock` and Ctrl+C/SIGTERM handling (spec §7).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -36,8 +36,10 @@ pub struct AppState {
     pub session: Mutex<Option<SessionHandle>>,
     /// Why the app could not start a session (busy, microphone gone, …).
     error: Mutex<Option<String>>,
-    /// The single-instance lock is taken once per process: a second
-    /// `CreateMutexW` reports "already exists" for *this* process too.
+    /// The single-instance lock is taken once per process: a second named
+    /// mutex reports "already exists" for *this* process too, and a second
+    /// `flock` would conflict with the lock the process already holds
+    /// (`start_session` carries the full comment).
     instance_held: AtomicBool,
 }
 
@@ -106,7 +108,7 @@ fn load_config() -> Config {
 }
 
 /// Plan §6.4: a run that died mid-talk gets its microphone back before this
-/// session touches anything. Windows only — the audio stack is (plan §1).
+/// session touches anything.
 #[cfg(windows)]
 fn recover_abandoned() {
     use ptt_core::audio::wasapi::WasapiController;
@@ -130,11 +132,33 @@ fn recover_abandoned() {
     }
 }
 
+/// The Unix twin of the recovery above — identical parts, the platform's
+/// microphone backend (spec §3).
 #[cfg(not(windows))]
-fn recover_abandoned() {}
+fn recover_abandoned() {
+    use ptt_core::failsafe::{self, Recovery};
+
+    match failsafe::recover(
+        &failsafe::default_path(),
+        ptt_cli::instance::process_running,
+        |device| ptt_cli::backends::microphone(device.to_string()),
+    ) {
+        Ok(Recovery::Restored {
+            device_id,
+            original_muted,
+        }) => info!(
+            "recovered the microphone abandoned by an earlier run ({device_id}: {})",
+            if original_muted { "muted" } else { "unmuted" }
+        ),
+        Ok(Recovery::Busy { pid }) => info!("the recorded session (pid {pid}) is still running"),
+        Ok(Recovery::Nothing) => {}
+        Err(error) => warn!("could not recover the recorded state: {error}"),
+    }
+}
 
 /// Plan §6.3: hand the microphone back if the app panics. The hook builds
-/// its own controller, so it works on whatever thread dies.
+/// its own controller, so it works on whatever thread dies — on all three
+/// platforms now (spec §3).
 fn install_panic_hook() {
     let state_path = ptt_core::failsafe::default_path();
     ptt_core::failsafe::install_panic_hook(move || {
@@ -150,6 +174,14 @@ fn install_panic_hook() {
                 Err(error) => eprintln!("ptt-tool: restoring after a panic failed: {error}"),
             }
         }
+        #[cfg(not(windows))]
+        match ptt_core::failsafe::restore_dirty(&state_path, |device| {
+            ptt_cli::backends::microphone(device.to_string())
+        }) {
+            Ok(true) => eprintln!("ptt-tool: microphone restored after a panic"),
+            Ok(false) => {}
+            Err(error) => eprintln!("ptt-tool: restoring after a panic failed: {error}"),
+        }
     });
 }
 
@@ -157,13 +189,24 @@ fn install_panic_hook() {
 fn start_session(state: &AppState) -> Result<(), String> {
     let config = state.config.lock().unwrap().clone();
 
+    // Linux only: under Wayland the input grab cannot work, so refuse before
+    // touching anything and let the settings window carry the explanation
+    // (design §2 — the rdev backend has the sharper per-start preflight, but
+    // a session built and torn down again is noise the user never asked for).
+    #[cfg(target_os = "linux")]
+    if let Some(message) = wayland_error() {
+        warn!("{message}");
+        *state.error.lock().unwrap() = Some(message.clone());
+        return Err(message);
+    }
+
     // Plan §9 M3: one hold-to-talk session at a time. If a `ptt ptt` console
     // session owns the microphone, say so instead of fighting it — and try
     // again the next time the tray asks (the console releases the lock when
-    // it quits). The lock is taken at most once per process: a second
-    // `CreateMutexW` here would report "already exists" for *this* process.
+    // it quits). The lock is taken at most once per process: a second named
+    // mutex reports "already exists" for *this* process, and a second
+    // `flock` would conflict with the one the process already holds.
     if !state.instance_held.load(Ordering::Relaxed) {
-        #[cfg(windows)]
         ptt_cli::instance::acquire().map_err(|error| error.to_string())?;
         state.instance_held.store(true, Ordering::Relaxed);
     }
@@ -199,13 +242,41 @@ fn spawn_session(config: &Config) -> Result<SessionHandle, String> {
     .map_err(|error| error.to_string())
 }
 
-/// The audio stack and the hooks are Windows-only (plan §1).
+/// The Unix twin of the Windows session: the rdev input backend (X11 on
+/// Linux, CGEventTap on macOS) plus the platform's microphone and cue
+/// backends (spec §2, §3, §5).
 #[cfg(not(windows))]
-fn spawn_session(_config: &Config) -> Result<SessionHandle, String> {
-    Err(format!(
-        "hold-to-talk runs on Windows only (this build targets {})",
-        std::env::consts::OS
-    ))
+fn spawn_session(config: &Config) -> Result<SessionHandle, String> {
+    use ptt_core::input::common::BackendInputSource;
+
+    SessionHandle::start_with_sound(
+        config.clone(),
+        ptt_cli::backends::microphone(config.audio.device_id.clone()),
+        BackendInputSource::new(),
+        ptt_core::failsafe::default_path(),
+        config.enabled,
+        Some(Box::new(ptt_cli::backends::sound_player())),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Linux only: the user-facing Wayland refusal — the set-up-time tail of
+/// design §2 (`None` on Windows and macOS, where nothing blocks a start).
+///
+/// XWayland keeps working: it provides the `DISPLAY` the evdev grab's
+/// pointer relay needs, which is exactly what the input backend's own
+/// per-start preflight checks — so the refusal here mirrors that check
+/// rather than sitting lower than it.
+#[cfg(target_os = "linux")]
+fn wayland_error() -> Option<String> {
+    let on_wayland = std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
+    let has_x11_display = std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty());
+    (on_wayland && !has_x11_display).then(|| {
+        "Wayland detected — global hotkeys need an X11 session (try logging out \
+         into an X11 session or use XWayland for this app)"
+            .into()
+    })
 }
 
 /// Stop the running session: hooks down, microphone handed back, record
@@ -365,8 +436,13 @@ pub fn list_devices(config: &Config) -> Result<Vec<ptt_core::audio::DeviceInfo>,
     }
     #[cfg(not(windows))]
     {
-        let _ = config;
-        Err("the microphone runs on Windows only".to_string())
+        use ptt_core::audio::MicController;
+        // Same contract as the Windows arm: the controller records the id
+        // and lists everything, so an unlisted device still shows up in the
+        // dropdown the moment it is plugged in (spec §3).
+        ptt_cli::backends::microphone(config.audio.device_id.clone())
+            .list_capture_devices()
+            .map_err(|error| error.to_string())
     }
 }
 

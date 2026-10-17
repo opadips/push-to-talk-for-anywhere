@@ -1,15 +1,13 @@
-//! Rolling file logging (plan §2: `tracing` + `tracing-appender` writing to
-//! `%LOCALAPPDATA%\ptt-tool\logs`).
+//! Rolling file logging (plan §2: `tracing` + `tracing-appender` into the
+//! per-OS log directory `ptt_core::paths` decides).
 
 use std::path::PathBuf;
 
-/// Where the log files live (plan §2: `%LOCALAPPDATA%\ptt-tool\logs`).
+/// Where the log files live (plan §2: `%LOCALAPPDATA%\ptt-tool\logs` on
+/// Windows, the state dir on Linux, `~/Library/Logs` on macOS — in
+/// `ptt_core::paths`).
 pub fn log_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ptt-tool")
-        .join("logs")
+    ptt_core::paths::log_dir()
 }
 
 /// Start logging at `info` into `logs/ptt.log` (rotated daily).

@@ -52,11 +52,21 @@ fn controller(command: &cli::Command) -> Result<Box<dyn MicController>> {
     Ok(Box::new(WasapiController::new(requested)))
 }
 
-/// The audio stack is Windows-only (plan §1: no macOS/Linux support).
+/// The audio stack's per-OS dispatch (spec §3): PulseAudio on Linux,
+/// CoreAudio on macOS, WASAPI on Windows.
 #[cfg(not(windows))]
-fn controller(_command: &cli::Command) -> Result<Box<dyn MicController>> {
-    anyhow::bail!(
-        "ptt controls the microphone on Windows only (this build targets {})",
-        std::env::consts::OS
-    )
+fn controller(command: &cli::Command) -> Result<Box<dyn MicController>> {
+    use ptt_core::audio::DEFAULT_DEVICE;
+
+    let requested = match command {
+        cli::Command::Mute { device }
+        | cli::Command::Unmute { device }
+        | cli::Command::Status { device } => {
+            device.clone().unwrap_or_else(|| DEFAULT_DEVICE.to_string())
+        }
+        cli::Command::Devices | cli::Command::Help => DEFAULT_DEVICE.to_string(),
+        // Unreachable: 'ptt ptt' is handled by ptt::run before this point.
+        cli::Command::Ptt(_) => DEFAULT_DEVICE.to_string(),
+    };
+    Ok(Box::new(ptt_cli::backends::microphone(requested)))
 }

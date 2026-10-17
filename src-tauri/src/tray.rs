@@ -63,9 +63,14 @@ pub fn build(app: &tauri::App) -> tauri::Result<(TrayIcon<Wry>, MenuItem<Wry>)> 
         .icon(icon(status.state)?)
         .tooltip("Push-to-Talk")
         .menu(&menu)
-        // Windows convention: right click opens the menu, left click opens
-        // the settings window (plan §9 M4).
-        .show_menu_on_left_click(false)
+        // Windows and macOS convention: right click opens the menu, left
+        // click opens the settings window (plan §9 M4). The Linux
+        // appindicator backend never delivers tray click events at all and
+        // shows the menu on the panel activations it does get — so the menu
+        // is the left-click behaviour there, with settings reachable as a
+        // menu entry (design §8), and this flag (ignored by that backend,
+        // but the lie is not worth keeping) says true.
+        .show_menu_on_left_click(cfg!(not(any(target_os = "windows", target_os = "macos"))))
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle" => crate::app::toggle_enabled(app),
             "settings" => crate::app::show_settings(app),
@@ -73,6 +78,8 @@ pub fn build(app: &tauri::App) -> tauri::Result<(TrayIcon<Wry>, MenuItem<Wry>)> 
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
+            // macOS runs the same left-click convention as Windows (design
+            // §8); Linux never fires this (see the flag above).
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 ..

@@ -4,6 +4,8 @@
 //! app (plan §9 M4) reuses its logging setup, its single-instance guard and
 //! its fail-safe wiring rather than growing a second copy of them.
 
+/// The backends each desktop wires in (spec §2/§3/§5).
+pub mod backends;
 pub mod cli;
 pub mod instance;
 pub mod logging;
