@@ -112,8 +112,17 @@ impl SessionHandle {
         S: InputSource + Send + 'static,
     {
         // Plan §6.1: remember the user's own mute state *before* touching it.
+        // Controllers that mute by driving the volume to zero report their
+        // level here too (spec §4), so a crash can hand the original level
+        // back; mute-native backends answer `None` and the record keeps the
+        // mute-only v1 shape.
         let original_muted = controller.get_mute()?;
-        failsafe::record(&state_path, &config.audio.device_id, original_muted)?;
+        failsafe::record_with_volume(
+            &state_path,
+            &config.audio.device_id,
+            original_muted,
+            &controller,
+        )?;
 
         let binding = config.binding();
         let swallow = config.binding.swallow;

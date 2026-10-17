@@ -19,10 +19,13 @@
 //!
 //! Windows resolution is exactly what `config::default_path`,
 //! `failsafe::default_path` and `diagnostics::findings_path` used to do
-//! inline: an unset or empty variable falls back to the temp directory, so
-//! the existing call sites in [`crate::config`], [`crate::failsafe`] and
+//! inline: an unset variable falls back to the temp directory, so the
+//! existing call sites in [`crate::config`], [`crate::failsafe`] and
 //! [`crate::diagnostics`] keep their behaviour byte-identical while they
-//! delegate here.
+//! delegate here. (One deliberate tightening: an *empty* variable used to
+//! build a CWD-relative path like `ptt-tool/config.toml`; it now also falls
+//! back to the temp directory, which is the only sensible reading of an
+//! empty `%APPDATA%`.)
 //!
 //! On Linux and macOS the directory itself is created on demand
 //! (`mkdir -p` semantics, failures ignored) so a first run on a bare system
@@ -159,8 +162,10 @@ pub(crate) fn log_dir_for(
 // --- shared building blocks -------------------------------------------------------
 
 /// The first component of a Windows app-data path: the variable's value, or
-/// the temp directory when it is unset *or empty* — the historical
-/// `unwrap_or_else(std::env::temp_dir)` fallback.
+/// the temp directory when it is unset — the historical
+/// `unwrap_or_else(std::env::temp_dir)` fallback. An *empty* value also
+/// falls back: the pre-port code built a CWD-relative path for one, which
+/// nothing could rely on.
 fn base_dir(windows_variable: &Option<OsString>) -> PathBuf {
     windows_variable
         .as_ref()

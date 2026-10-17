@@ -7,10 +7,12 @@ actually observe. Windows 10/11 checks are the main body below; the
 ## Per-OS overlay notes
 
 - **Linux input** needs an **X11 session** (the app, CLI included). On Wayland
-  nothing is captured: the backend refuses politely and the settings window
-  shows the error *"no X display on this Wayland session (DISPLAY unset):
-  global push-to-talk needs X11 or an X11 desktop — Wayland is not supported
-  yet"*. Test under XWayland where a desktop forces it.
+  nothing is captured: the tray app refuses before capturing and shows
+  *"Wayland detected — global hotkeys need an X11 session (try logging out
+  into an X11 session or use XWayland for this app)"* in the settings window,
+  while the `ptt` CLI session reports *"no X display on this Wayland session
+  (DISPLAY unset): global push-to-talk needs X11 or an X11 desktop — Wayland
+  is not supported yet"*. Test under XWayland where a desktop forces it.
 - **macOS input** needs the **Accessibility** permission (System Settings →
   Privacy & Security → Accessibility); without it the app errors instead of
   capturing keys. Record what it looks like on first launch of each binary.

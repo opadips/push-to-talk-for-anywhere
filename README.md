@@ -144,13 +144,17 @@ Enter or Ctrl+C quits a session and restores the mute state it found at start-up
 ## Platform differences
 
 Everything above works the same on Windows 10/11, Linux (X11 sessions) and
-macOS (Apple Silicon and Intel). A few things differ per platform:
+macOS (releases are packaged for Apple Silicon; Intel Macs can build from
+source). A few things differ per platform:
 
 - **Input and permissions.** Linux needs an X11 session — on Wayland there is
-  no global input hook, and the app refuses politely with the error
+  no global input hook. The tray app refuses before capturing and shows
+  *"Wayland detected — global hotkeys need an X11 session (try logging out
+  into an X11 session or use XWayland for this app)"* in the settings error
+  banner; the `ptt` CLI session reports
   *"no X display on this Wayland session (DISPLAY unset): global push-to-talk
-  needs X11 or an X11 desktop — Wayland is not supported yet"* in the settings
-  error banner. macOS asks for **Accessibility** permission the first time
+  needs X11 or an X11 desktop — Wayland is not supported yet"*. macOS asks
+  for **Accessibility** permission the first time
   (System Settings → Privacy & Security → Accessibility) — without it the app
   cannot see key presses. If key *blocking* (swallow) is not available,
   Linux/macOS fall back to listening and warn once.
