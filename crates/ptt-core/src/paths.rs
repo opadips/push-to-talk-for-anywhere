@@ -391,10 +391,16 @@ mod tests {
     #[test]
     fn the_real_files_live_under_the_ptt_tool_directory() {
         let ptt_tool = Path::new("ptt-tool");
+        // Windows/Linux: logs under ptt-tool/logs/
+        // macOS: log dir is ~/Library/Logs/ptt-tool/ (no "logs" leaf),
+        // findings is ~/Library/Logs/ptt-tool/findings.log
+        #[cfg(target_os = "macos")]
+        let under_ptt_tool_logs = ptt_tool.to_path_buf();
+        #[cfg(not(target_os = "macos"))]
         let under_ptt_tool_logs = ptt_tool.join("logs");
+        let log = log_dir();
         assert!(config_file().ends_with(ptt_tool.join("config.toml")));
         assert!(state_file().ends_with(ptt_tool.join("state.json")));
-        let log = log_dir();
         assert!(log.ends_with(&under_ptt_tool_logs));
         assert_eq!(findings_file(), log.join("findings.log"));
         // Repeated asking is stable — the settings window, the session worker

@@ -616,11 +616,15 @@ mod tests {
         // Path shape only — the durable write itself runs on the watchdog
         // thread against the real path and is not exercised under parallel
         // tests (same reasoning as the glue's other untested statics).
-        assert!(findings_path().ends_with(
-            std::path::Path::new("ptt-tool")
-                .join("logs")
-                .join("findings.log")
-        ));
+        // Windows/Linux: .../ptt-tool/logs/findings.log
+        // macOS:         .../ptt-tool/findings.log  (Logs/ptt-tool/ not Logs/ptt-tool/logs/)
+        #[cfg(target_os = "macos")]
+        let expected = std::path::Path::new("ptt-tool").join("findings.log");
+        #[cfg(not(target_os = "macos"))]
+        let expected = std::path::Path::new("ptt-tool")
+            .join("logs")
+            .join("findings.log");
+        assert!(findings_path().ends_with(&expected));
     }
 
     #[test]
