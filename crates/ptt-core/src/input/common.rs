@@ -1239,6 +1239,9 @@ mod tests {
 
     #[test]
     fn a_side_specific_modifier_binding_fires_on_the_generic_press() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // The settings window offers 0xA0..=0xA5 as single keys (plan §9 M4)
         // while this platform always reports generic 0x10/0x11/0x12 with a
         // side signal — `matches_key` normalises both sides, so the set-up
