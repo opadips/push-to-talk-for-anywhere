@@ -3221,7 +3221,7 @@ dependencies = [
 
 [[package]]
 name = "ptt-cli"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "libc",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "ptt-core"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "libpulse-binding",
  "libpulse-simple-binding",
@@ -3253,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "ptt-tool"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "ptt-cli",
