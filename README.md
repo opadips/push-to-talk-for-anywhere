@@ -60,26 +60,64 @@ stream — the mic opens when you press and closes when you let go.
 - **Apps with no mute** — old VOIP clients and web apps that expose no mic
   control at all. The system mic is fair game, so anything can get push-to-talk.
 
-## Getting it
+## Getting it and running
 
-Download `push-to-talk-for-anywhere-vX.Y.Z-windows-x64.zip` (or the plain `.exe`, it's the same
-program) from the [Releases](https://github.com/opadips/push-to-talk-for-anywhere/releases)
-page. Unzip, run `push-to-talk-for-anywhere.exe`. That's it.
+Download the archive for your operating system from the [Releases](https://github.com/opadips/push-to-talk-for-anywhere/releases) page (`SHA256SUMS.txt` is available alongside releases to verify checksums).
 
-On Linux grab `push-to-talk-for-anywhere-vX.Y.Z-linux-x64.tar.gz`, on macOS
-`push-to-talk-for-anywhere-vX.Y.Z-macos-arm64.zip` — both unpack to the
-`push-to-talk-for-anywhere` tray app plus the `ptt` command-line tool, same
-deal as the zip.
+### Windows (10 / 11)
+- Download `push-to-talk-for-anywhere-vX.Y.Z-windows-x64.zip` (or the standalone `...-windows-x64.exe`).
+- Unzip and run `push-to-talk-for-anywhere.exe`.
+- *Note:* If the active application you are talking into runs with elevated/administrator privileges, run `push-to-talk-for-anywhere.exe` as administrator too so Windows allows the global input hook to function while that window has focus.
 
-There's a `SHA256SUMS.txt` next to the files if you want to check them.
+### Linux (X11)
+- Download `push-to-talk-for-anywhere-vX.Y.Z-linux-x64.tar.gz`.
+- Unpack and enter the directory:
+  ```bash
+  tar -xzf push-to-talk-for-anywhere-v*-linux-x64.tar.gz
+  cd push-to-talk-for-anywhere-v*-linux-x64
+  ```
+- Run the tray application:
+  ```bash
+  ./push-to-talk-for-anywhere
+  ```
+  Or run via command-line:
+  ```bash
+  ./ptt ptt
+  ```
+- **Requirements & Setup:**
+  - **Desktop Session:** Requires an X11 or XWayland session (pure Wayland sessions cannot capture global input hooks yet).
+  - **Audio System:** Uses PulseAudio or PipeWire (`pipewire-pulse`).
+  - **Dependencies:** Standard desktop packages (`libwebkit2gtk-4.1`, `libgtk-3`, `libpulse`, `libxdo`). On Debian/Ubuntu:
+    ```bash
+    sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libpulse0 libxdo3
+    ```
+  - **Key Blocking (Swallowing):** To allow the app to intercept and swallow bound keys before other apps see them, your user needs read/write access to `/dev/input/event*` and `/dev/uinput`:
+    ```bash
+    sudo usermod -aG input,uinput $USER
+    ```
+    Log out and log back in for group changes to take effect. If not in these groups, the app automatically falls back to listening mode (push-to-talk unmutes the microphone normally, but the bound key also reaches other apps).
 
-If the window you're talking into runs with **higher privileges** (an elevated /
-administrator app — a Windows situation), run `push-to-talk-for-anywhere.exe` as administrator too — otherwise Windows
-blocks the hotkey and it won't respond while that window has focus.
+### macOS (Apple Silicon, macOS 12+)
+- Download `push-to-talk-for-anywhere-vX.Y.Z-macos-arm64.zip`.
+- Unzip the archive:
+  ```bash
+  unzip push-to-talk-for-anywhere-v*-macos-arm64.zip
+  cd push-to-talk-for-anywhere-v*-macos-arm64
+  ```
+- Run the tray application or CLI:
+  ```bash
+  ./push-to-talk-for-anywhere
+  # or ./ptt ptt
+  ```
+- **Requirements & Permissions:**
+  - **Accessibility Permission:** macOS requires Accessibility permission to detect global hotkeys. On first launch, open **System Settings → Privacy & Security → Accessibility** and toggle on `push-to-talk-for-anywhere` (or Terminal/iTerm if running via command line).
+  - **Microphone Permission:** When prompted, grant microphone access so the app can control input volume and mute state.
+  - **Gatekeeper:** Because release binaries are unsigned, macOS Gatekeeper may show a warning. Right-click the binary and click **Open**, or clear the quarantine attribute:
+    ```bash
+    xattr -d com.apple.quarantine ./push-to-talk-for-anywhere ./ptt
+    ```
 
-Heads up: the app installs a global keyboard hook, which some antivirus tools
-and anti-cheat systems find suspicious. Nothing shady is going on, see Privacy
-below, but expect the occasional false positive on an unsigned build.
+Heads up: the app installs a global keyboard hook, which some antivirus tools and anti-cheat systems find suspicious. Nothing shady is going on, see Privacy below, but expect the occasional false positive on an unsigned build.
 
 ## Using it
 
