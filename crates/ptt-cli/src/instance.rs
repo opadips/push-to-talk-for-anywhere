@@ -34,11 +34,14 @@ pub fn acquire() -> anyhow::Result<()> {
         // Spec §7: an XDG runtime lock — `$XDG_RUNTIME_DIR` is per-login
         // fresh and private to the user, `/tmp` covers sessions without
         // one. The file itself stays empty; the `flock` on it is the guard.
-        let path = std::env::var_os("XDG_RUNTIME_DIR")
+        let path = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")
             .and_then(|value| (!value.is_empty()).then_some(value))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("ptt-tool.lock");
+        {
+            std::path::PathBuf::from(dir).join("ptt-tool.lock")
+        } else {
+            let uid = unsafe { libc::getuid() };
+            std::env::temp_dir().join(format!("ptt-tool-{uid}.lock"))
+        };
 
         let file = std::fs::File::create(&path)
             .map_err(|error| anyhow::anyhow!("cannot create the single-instance lock: {error}"))?;

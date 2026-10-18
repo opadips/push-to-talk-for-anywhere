@@ -94,7 +94,7 @@ jobs:
           BUMP: ${{ inputs.bump }}
           EXPLICIT: ${{ inputs.version }}
         run: |
-          version="$(scripts/release-version.sh next "$BUMP" "$EXPLICIT")"
+          version="$(bash scripts/release-version.sh next "$BUMP" "$EXPLICIT")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Releasing v$version" >> "$GITHUB_STEP_SUMMARY"
@@ -107,7 +107,7 @@ jobs:
       - name: Set the version in Cargo.toml and Cargo.lock
         shell: bash
         run: |
-          scripts/release-version.sh apply "${{ steps.version.outputs.version }}"
+          bash scripts/release-version.sh apply "${{ steps.version.outputs.version }}"
           # Only the workspace members change; no other dependency moves.
           cargo update --workspace
 
@@ -214,11 +214,12 @@ jobs:
 
       - name: Work out the version again
         id: version
+        shell: bash
         env:
           BUMP: ${{ inputs.bump }}
           EXPLICIT: ${{ inputs.version }}
         run: |
-          version="$(scripts/release-version.sh next "$BUMP" "$EXPLICIT")"
+          version="$(bash scripts/release-version.sh next "$BUMP" "$EXPLICIT")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
