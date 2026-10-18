@@ -168,7 +168,7 @@ jobs:
               tar -czf "dist/$name.tar.gz" -C "dist/$name" .
               rm -rf "dist/$name"
               ;;
-            Darwin)
+            macOS|Darwin)
               name="push-to-talk-for-anywhere-v${VERSION}-macos-arm64"
               mkdir -p "dist/$name"
               cp target/release/ptt README.md "dist/$name/"
