@@ -49,17 +49,53 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.os }} — gates + release build
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            id: windows
-          - os: ubuntu-22.04
-            id: linux
-          - os: macos-latest
-            id: macos
+          - id: windows-amd64
+            name: Windows x64 (amd64)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: amd64
+            test: true
+          - id: windows-arm64
+            name: Windows ARM64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            arch: arm64
+            test: false
+          - id: macos-arm64
+            name: macOS Apple Silicon (arm64)
+            os: macos-latest
+            target: aarch64-apple-darwin
+            arch: arm64
+            test: true
+          - id: macos-intel
+            name: macOS Intel (x86_64)
+            os: macos-latest
+            target: x86_64-apple-darwin
+            arch: intel
+            test: true
+          - id: linux-amd64
+            name: Linux amd64 (x86_64)
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+            test: true
+          - id: linux-arm64
+            name: Linux arm64 (AArch64)
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+            test: true
+          - id: linux-armv7
+            name: Linux armv7 (32-bit ARM)
+            os: ubuntu-22.04
+            target: armv7-unknown-linux-gnueabihf
+            arch: armv7
+            test: false
     runs-on: ${{ matrix.os }}
     steps:
       - name: Only release from the default branch
@@ -77,15 +113,46 @@ jobs:
         with:
           fetch-depth: 0 # the tags are needed to find the latest version
 
-      # Linux needs the usual Tauri/dev packages before it can build the
-      # workspace; the other runners need nothing extra.
+      # Linux native targets (amd64 and arm64) need the standard Tauri/dev packages.
       - name: Install Linux system packages
-        if: matrix.id == 'linux'
+        if: matrix.id == 'linux-amd64' || matrix.id == 'linux-arm64'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libpulse-dev \
             xorg-dev librsvg2-dev build-essential curl wget file libxdo-dev \
             libssl-dev
+
+      # Linux armv7 cross-compilation setup on ubuntu-22.04 using multiarch armhf.
+      - name: Setup Linux armv7 cross-compilation dependencies
+        if: matrix.id == 'linux-armv7'
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo sed -i 's/^deb /deb [arch=amd64,i386] /' /etc/apt/sources.list
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          cat << 'EOF' | sudo tee /etc/apt/sources.list.d/armhf.list
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            autoconf automake libtool \
+            pkg-config \
+            libwebkit2gtk-4.1-dev:armhf \
+            libgtk-3-dev:armhf \
+            libpulse-dev:armhf \
+            libxdo-dev:armhf \
+            libssl-dev:armhf \
+            librsvg2-dev:armhf
+
+      # Windows ARM64 needs MSVC cross-compilation environment
+      - name: Setup MSVC for Windows ARM64
+        if: matrix.id == 'windows-arm64'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
 
       - name: Work out the version
         id: version
@@ -102,6 +169,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
+          targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Set the version in Cargo.toml and Cargo.lock
@@ -113,6 +181,8 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install Node
         uses: actions/setup-node@v4
@@ -132,49 +202,78 @@ jobs:
 
       # The same gates as CI: nothing is released that would not pass them.
       - name: Format
+        if: matrix.id == 'linux-amd64' || matrix.id == 'windows-amd64' || matrix.id == 'macos-arm64'
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        if: matrix.test
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        if: matrix.test
+        run: cargo test --target ${{ matrix.target }}
 
       - name: Build (release, locked to Cargo.lock)
-        run: cargo build --release --locked
+        env:
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.id == 'linux-armv7' && '1' || '' }}
+          PKG_CONFIG_PATH: ${{ matrix.id == 'linux-armv7' && '/usr/lib/arm-linux-gnueabihf/pkgconfig' || '' }}
+          PKG_CONFIG_SYSROOT_DIR: ${{ matrix.id == 'linux-armv7' && '/' || '' }}
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: ${{ matrix.id == 'linux-armv7' && 'arm-linux-gnueabihf-gcc' || '' }}
+          CC_armv7_unknown_linux_gnueabihf: ${{ matrix.id == 'linux-armv7' && 'arm-linux-gnueabihf-gcc' || '' }}
+          CXX_armv7_unknown_linux_gnueabihf: ${{ matrix.id == 'linux-armv7' && 'arm-linux-gnueabihf-g++' || '' }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
         run: |
+          TARGET_DIR="target/${TARGET}/release"
+          if [ ! -d "$TARGET_DIR" ]; then
+            TARGET_DIR="target/release"
+          fi
+
           case "$RUNNER_OS" in
             Windows)
-              name="push-to-talk-for-anywhere-v${VERSION}-windows-x64"
+              name="push-to-talk-for-anywhere-v${VERSION}-windows-${ARCH}"
               mkdir -p "dist/$name"
-              cp target/release/ptt.exe README.md "dist/$name/"
+              cp "$TARGET_DIR/ptt.exe" README.md "dist/$name/"
               # The cargo binary stays ptt-tool.exe; everything shipped is named push-to-talk-for-anywhere.
-              cp target/release/ptt-tool.exe "dist/$name/push-to-talk-for-anywhere.exe"
+              cp "$TARGET_DIR/ptt-tool.exe" "dist/$name/push-to-talk-for-anywhere.exe"
               # The tray app is one self-contained file; offer it on its own too.
-              cp target/release/ptt-tool.exe "dist/${name}.exe"
+              cp "$TARGET_DIR/ptt-tool.exe" "dist/${name}.exe"
               powershell -NoProfile -Command "Compress-Archive -Path 'dist/$name/*' -DestinationPath 'dist/$name.zip'"
               rm -rf "dist/$name"
+              if [ "$ARCH" = "amd64" ]; then
+                cp "dist/${name}.zip" "dist/push-to-talk-for-anywhere-v${VERSION}-windows-x64.zip"
+                cp "dist/${name}.exe" "dist/push-to-talk-for-anywhere-v${VERSION}-windows-x64.exe"
+              fi
               ;;
             Linux)
-              name="push-to-talk-for-anywhere-v${VERSION}-linux-x64"
+              name="push-to-talk-for-anywhere-v${VERSION}-linux-${ARCH}"
               mkdir -p "dist/$name"
-              cp target/release/ptt README.md "dist/$name/"
-              cp target/release/ptt-tool "dist/$name/push-to-talk-for-anywhere"
+              cp "$TARGET_DIR/ptt" README.md "dist/$name/"
+              cp "$TARGET_DIR/ptt-tool" "dist/$name/push-to-talk-for-anywhere"
               tar -czf "dist/$name.tar.gz" -C "dist/$name" .
               rm -rf "dist/$name"
+              if [ "$ARCH" = "amd64" ]; then
+                cp "dist/$name.tar.gz" "dist/push-to-talk-for-anywhere-v${VERSION}-linux-x64.tar.gz"
+              fi
               ;;
             macOS|Darwin)
-              name="push-to-talk-for-anywhere-v${VERSION}-macos-arm64"
+              name="push-to-talk-for-anywhere-v${VERSION}-macos-${ARCH}"
               mkdir -p "dist/$name"
-              cp target/release/ptt README.md "dist/$name/"
-              cp target/release/ptt-tool "dist/$name/push-to-talk-for-anywhere"
+              cp "$TARGET_DIR/ptt" README.md "dist/$name/"
+              cp "$TARGET_DIR/ptt-tool" "dist/$name/push-to-talk-for-anywhere"
               (cd "dist/$name" && zip -q -r "../$name.zip" .)
               rm -rf "dist/$name"
+              if [ "$ARCH" = "arm64" ]; then
+                cp "dist/$name.zip" "dist/push-to-talk-for-anywhere-v${VERSION}-macos-apple-silicon.zip"
+              elif [ "$ARCH" = "intel" ]; then
+                cp "dist/$name.zip" "dist/push-to-talk-for-anywhere-v${VERSION}-macos-x64.zip"
+              fi
               ;;
             *)
               echo "::error::Unknown runner OS: $RUNNER_OS"
@@ -191,10 +290,10 @@ jobs:
           path: dist/*
           retention-days: 3
 
-      # One job owns the manifest that gets committed; the Linux one runs the
+      # One job owns the manifest that gets committed; the Linux amd64 one runs the
       # update that ends up in the repository.
       - name: Upload the manifest for committing
-        if: matrix.id == 'linux'
+        if: matrix.id == 'linux-amd64'
         uses: actions/upload-artifact@v4
         with:
           name: cargo-manifest
@@ -303,11 +402,15 @@ jobs:
           cat > release-notes.md <<NOTES
           Downloads:
 
-          - **Windows 10/11** — \`push-to-talk-for-anywhere-v${VERSION}-windows-x64.zip\` or the bare \`…-windows-x64.exe\` (the tray app on its own)
-          - **Linux (X11, amd64)** — \`push-to-talk-for-anywhere-v${VERSION}-linux-x64.tar.gz\` (the tray app and the \`ptt\` tool). Needs an X11 or XWayland session; Wayland is not supported yet.
-          - **macOS (Apple Silicon)** — \`push-to-talk-for-anywhere-v${VERSION}-macos-arm64.zip\` (the tray app and the \`ptt\` tool). Grant the Accessibility permission on first launch.
+          - **Windows 10/11 (x64 / amd64)** — \`push-to-talk-for-anywhere-v${VERSION}-windows-amd64.zip\` or the bare \`push-to-talk-for-anywhere-v${VERSION}-windows-amd64.exe\` (also available as \`…-windows-x64.*\`)
+          - **Windows 11 (ARM64)** — \`push-to-talk-for-anywhere-v${VERSION}-windows-arm64.zip\` or the bare \`push-to-talk-for-anywhere-v${VERSION}-windows-arm64.exe\`
+          - **macOS (Apple Silicon)** — \`push-to-talk-for-anywhere-v${VERSION}-macos-arm64.zip\` (grant Accessibility permission on first launch)
+          - **macOS (Intel)** — \`push-to-talk-for-anywhere-v${VERSION}-macos-intel.zip\` (also available as \`…-macos-x64.zip\`)
+          - **Linux (amd64 / x86_64)** — \`push-to-talk-for-anywhere-v${VERSION}-linux-amd64.tar.gz\` (also available as \`…-linux-x64.tar.gz\`)
+          - **Linux (arm64 / AArch64)** — \`push-to-talk-for-anywhere-v${VERSION}-linux-arm64.tar.gz\`
+          - **Linux (armv7 / 32-bit ARM)** — \`push-to-talk-for-anywhere-v${VERSION}-linux-armv7.tar.gz\`
 
-          Each zip/tar.gz contains the \`push-to-talk-for-anywhere\` tray app plus the \`ptt\` command-line tool and the README. Checksums are in \`SHA256SUMS.txt\`.
+          Each archive contains the \`push-to-talk-for-anywhere\` tray app plus the \`ptt\` command-line tool and README. Checksums are in \`SHA256SUMS.txt\`.
 
           Windows: to use the hotkey while a program that runs as administrator has focus, run push-to-talk-for-anywhere as administrator too.
 
